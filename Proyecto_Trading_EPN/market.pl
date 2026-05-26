@@ -6,7 +6,7 @@ use strict;
 use warnings;
 
 # Ajustar la ruta de librerias al directorio del proyecto
-use lib '/home/kathe/Documentos/Proyecto_Trading_EPN';
+use lib '.';
 
 use Tk;
 use Time::Moment;
