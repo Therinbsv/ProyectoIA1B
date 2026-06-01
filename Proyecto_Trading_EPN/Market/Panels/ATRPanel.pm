@@ -1,162 +1,201 @@
 package Market::Panels::ATRPanel;
-# Renderiza el indicador ATR en un panel separado con su propia escala vertical.
-# Responsabilidad unica: SOLO renderizado del ATR, SIN logica de calculo.
 use strict;
 use warnings;
-use List::Util qw(min max);
 
+# new(): Constructor del panel ATR. Recibe argumentos named (hash).
 sub new {
     my ($class, %args) = @_;
+
+    # Creamos el objeto con todos los argumentos recibidos.
     my $self = {
-        line_color  => $args{line_color}  // '#c0392b',   # rojo oscuro como TradingView
-        line_width  => $args{line_width}  // 1,
-        canvas      => undef,
-        scale       => undef,
-        values      => [],
-        # IDs de items del crosshair
-        _ch_v       => undef,
-        _ch_h       => undef,
-        _ch_val     => undef,
-        _ch_box     => undef,
+        %args,
+        crosshair_objects => []   # Lista para guardar IDs de objetos del crosshair (aunque en este panel no se usa mucho)
     };
+    # El tema (paleta clara) se inyecta vía `theme => \%theme` desde ChartEngine.
+    # Garantizar robustez: si no llega, dejar un hashref vacío para que las lecturas
+    # posteriores (con defaults //) sean seguras.
+    $self->{theme} = {} unless defined $self->{theme};
     bless $self, $class;
     return $self;
 }
 
-# Crea los objetos graficos del crosshair en el panel ATR.
-# Input: $canvas (Tk::Canvas)
+# _init_crosshair(): Inicializa la lista de objetos del crosshair (no se usa mucho en este panel).
 sub _init_crosshair {
+    my ($self) = @_;
+    $self->{crosshair_objects} = [];
+}
+
+# _canvas_size(): Obtiene el ancho y alto reales del canvas Tk.
+# Maneja diferentes formas de obtener la geometría.
+sub _canvas_size {
     my ($self, $canvas) = @_;
-    $self->{canvas} = $canvas;
-    $canvas->delete('crosshair');
-    # Linea vertical
-    $self->{_ch_v} = $canvas->createLine(0,0,0,0,
-        -fill => '#999999', -dash => [3,3], -tags => 'crosshair', -state => 'hidden');
-    # Linea horizontal
-    $self->{_ch_h} = $canvas->createLine(0,0,0,0,
-        -fill => '#999999', -dash => [3,3], -tags => 'crosshair', -state => 'hidden');
-    # Caja del valor en eje Y
-    $self->{_ch_box} = $canvas->createRectangle(0,0,0,0,
-        -fill => '#131722', -outline => '#131722', -tags => 'crosshair', -state => 'hidden');
-    # Texto del valor en eje Y
-    $self->{_ch_val} = $canvas->createText(0,0,
-        -text => '', -fill => '#ffffff', -font => ['Helvetica', 9],
-        -anchor => 'e', -tags => 'crosshair', -state => 'hidden');
+    my ($w, $h) = (0, 0);
+    # Intentar obtener geometría con 'geometry()' (formato "ancho x alto")
+    my $geom = eval { $canvas->geometry() };
+    if (defined $geom && $geom =~ /^(\d+)x(\d+)/) {
+        ($w, $h) = ($1, $2);
+    }
+    # Fallbacks: usar métodos Width/Height, width/height, o 1 por defecto.
+    $w ||= eval { $canvas->Width() }  || eval { $canvas->width() }  || 1;
+    $h ||= eval { $canvas->Height() } || eval { $canvas->height() } || 1;
+    $w = 1 if $w < 1;
+    $h = 1 if $h < 1;
+    return ($w, $h);
 }
 
-# Calcula el rango min/max de los valores ATR visibles con padding del 5%.
-# Input: $values (arrayref, puede contener undef)
-# Output: ($min_val, $max_val)
+# get_y_range(): Calcula el rango de valores visibles del ATR para escalar el eje Y.
+# Recibe una lista de valores (algunos pueden ser undef durante warm-up).
+# Devuelve (min, max) con un padding del 5%.
 sub get_y_range {
-    my ($self, $values) = @_;
-    return (0, 1) unless $values && @$values;
-    my @valid = grep { defined $_ } @$values;
-    return (0, 1) unless @valid;
-    my $mn  = min(@valid);
-    my $mx  = max(@valid);
-    my $pad = ($mx - $mn) * 0.1;
-    $pad = 0.01 if $pad < 0.01;
-    return ($mn - $pad, $mx + $pad);
+    my ($self, $visible_values) = @_;
+
+    # Si no hay valores definidos, devolver un rango por defecto (0,100).
+    return (0, 100) if !@$visible_values;
+
+    # Filtrar los valores definidos (ignorar undef del warm-up).
+    my @defined = grep { defined $_ } @$visible_values;
+    return (0, 100) unless @defined;
+
+    # Encontrar mínimo y máximo.
+    my $min = $defined[0];
+    my $max = $defined[0];
+
+    foreach my $val (@defined) {
+        $min = $val if $val < $min;
+        $max = $val if $val > $max;
+    }
+
+    # Agregar padding del 5% para que la línea no toque los bordes.
+    my $padding = ($max - $min) * 0.05 || 1;
+    return ($min - $padding, $max + $padding);
 }
 
-# Asigna la escala vertical al panel.
+# set_scale(): Asigna el objeto Scales a este panel.
+# Scales se encarga de convertir datos (índices, valores) a coordenadas de píxel.
 sub set_scale {
     my ($self, $scale) = @_;
     $self->{scale} = $scale;
 }
 
-# Renderiza la linea del ATR en el canvas.
-# Input: $canvas (Tk::Canvas), $values (arrayref), $scale (Scales)
+# render(): Dibuja la línea del ATR como polilínea sobre el canvas Tk.
 sub render {
-    my ($self, $canvas, $values, $scale) = @_;
-    $canvas->delete('atr_line');
-    return unless $values && @$values;
+    my ($self, $canvas, $visible_values, $scale) = @_;
 
-    $self->{scale}  = $scale;
-    $self->{values} = $values;
-    $self->{canvas} = $canvas;
+    $canvas->delete('all');   # Limpiar todo el canvas antes de dibujar
 
-    my ($prev_x, $prev_y);
-    for my $i (0 .. $#$values) {
-        my $val = $values->[$i];
-        next unless defined $val;
+    return if !@$visible_values;  # No hay datos, salir
 
-        my $idx = $scale->{offset} + $i;
-        my $x   = $scale->index_to_center_x($idx);
-        my $y   = $scale->value_to_y($val);
+    # Inyectar dimensiones del canvas en el objeto scale
+    my ($canvas_w, $canvas_h) = $self->_canvas_size($canvas);
+    # ChartEngine puede inyectar un ancho compartido para sincronizar X con precio.
+    $scale->{width}  ||= $canvas_w;
+    $scale->{height} = $canvas_h;
 
-        if (defined $prev_x) {
-            $canvas->createLine($prev_x, $prev_y, $x, $y,
-                -fill  => $self->{line_color},
-                -width => $self->{line_width},
-                -tags  => 'atr_line');
-        }
-        $prev_x = $x;
-        $prev_y = $y;
+    # Inyectar colores de eje del tema en la escala antes de dibujar el eje Y.
+    # La conversión datos↔píxeles sigue viviendo en Scales; aquí solo se le pasan
+    # los colores claros (con defaults seguros si el tema no está disponible).
+    $scale->{grid_color}      = $self->{theme}{grid}      // '#e6e6e6';
+    $scale->{axis_text_color} = $self->{theme}{axis_text} // '#363a45';
+
+    # Dibujar el eje Y (con grid y números) usando el objeto scale.
+    $scale->_draw_y_scale($canvas);
+    $canvas->lower('y_grid');   # Enviar la grid al fondo para que no tape la línea
+
+    # Construir la polilínea: pares (x, y) para cada valor definido.
+    my @points;
+    $self->{_last_value} = undef;   # Para la etiqueta del último valor
+
+    for (my $i = 0; $i < @$visible_values; $i++) {
+        my $val = $visible_values->[$i];
+        next if !defined $val;      # Saltar valores undef (warm-up)
+
+        # Convertir índice a coordenada X (centro de la barra)
+        my $x = $scale->index_to_center_x($i);
+        # Convertir valor ATR a coordenada Y (píxel)
+        my $y = $scale->value_to_y($val);
+
+        push @points, ($x, $y);
+        $self->{_last_value} = $val;   # Actualizar el último valor definido
     }
+
+    # Dibujar la línea si tenemos al menos 2 puntos (4 números en @points).
+    if (@points >= 4) {
+        my $atr_color = $self->{theme}{atr_line} // '#2962ff';  # Azul por defecto
+        $canvas->createLine(@points, -fill => $atr_color, -width => 1.5, -tags => 'atr_line');
+        $canvas->raise('atr_line');  # Traer la línea al frente
+    }
+
+    # Dibujar la etiqueta del último valor visible en el margen derecho.
+    $self->render_last_visible_value($canvas);
 }
 
-# Muestra el ultimo valor ATR visible con caja en el eje Y.
-# Input: $canvas (Tk::Canvas)
+# render_last_visible_value(): Muestra la etiqueta del último valor del ATR en el margen derecho.
 sub render_last_visible_value {
     my ($self, $canvas) = @_;
-    $canvas->delete('last_atr');
-    return unless $self->{scale} && $self->{values} && @{ $self->{values} };
 
-    my $last_val;
-    for my $v (reverse @{ $self->{values} }) {
-        if (defined $v) { $last_val = $v; last; }
-    }
-    return unless defined $last_val;
-
-    my $y     = $self->{scale}->value_to_y($last_val);
-    my $w     = $self->{scale}->{width};
-    my $label = sprintf("%.2f", $last_val);
-
-    $canvas->createRectangle($w - 63, $y - 8, $w, $y + 8,
-        -fill => '#c0392b', -outline => '#c0392b', -tags => 'last_atr');
-    $canvas->createText($w - 4, $y,
-        -text => $label, -anchor => 'e',
-        -fill => '#ffffff', -font => ['Helvetica', 9],
-        -tags => 'last_atr');
-}
-
-# Dibuja el crosshair sincronizado en el panel ATR.
-# Input: $x, $y (coordenadas del mouse en este panel)
-sub draw_crosshair {
-    my ($self, $x, $y) = @_;
-    my $canvas = $self->{canvas};
-    return unless $canvas && defined $self->{_ch_v};
+    $canvas->delete('atr_last_label');   # Borrar etiqueta anterior si existe
 
     my $scale = $self->{scale};
-    return unless $scale;
+    return unless defined $scale;
+    # Si la escala tiene la bandera draw_last_label en false, no dibujar.
+    return if exists $scale->{draw_last_label} && !$scale->{draw_last_label};
+    return unless defined $self->{_last_value};   # No hay último valor, salir
 
-    my $w = $scale->{width};
-    my $h = $scale->{height};
+    my $val   = $self->{_last_value};
+    my $y     = $scale->value_to_y($val);         # Posición Y en píxeles
+    my $w     = $scale->{width};                  # Ancho del canvas
+    my $label = sprintf("%.4f", $val);            # Formatear con 4 decimales
+    my $label_bg = $self->{theme}{last_price_bg} // '#363a45';
+    my $label_fg = $self->{theme}{last_price_fg} // '#ffffff';
+    my $line     = $self->{theme}{atr_line}      // '#2962ff';
 
-    $canvas->coords($self->{_ch_v}, $x, 0, $x, $h);
-    $canvas->itemconfigure($self->{_ch_v}, -state => 'normal');
-
-    $canvas->coords($self->{_ch_h}, 0, $y, $w, $y);
-    $canvas->itemconfigure($self->{_ch_h}, -state => 'normal');
-
-    # Valor ATR en eje Y
-    my $val     = $scale->y_to_value($y);
-    my $val_lbl = sprintf("%.3f", $val);
-    $canvas->coords($self->{_ch_box}, $w - 65, $y - 9, $w, $y + 9);
-    $canvas->itemconfigure($self->{_ch_box}, -state => 'normal');
-    $canvas->coords($self->{_ch_val}, $w - 4, $y);
-    $canvas->itemconfigure($self->{_ch_val}, -state => 'normal', -text => $val_lbl);
-
-    $canvas->raise('crosshair');
+    # Dibujar rectángulo de fondo de la etiqueta
+    $canvas->createRectangle(
+        $w - 68, $y - 7, $w, $y + 7,
+        -fill    => $label_bg,
+        -outline => $line,
+        -tags    => 'atr_last_label',
+    );
+    # Dibujar texto de la etiqueta
+    $canvas->createText(
+        $w - 66, $y,
+        -text   => $label,
+        -anchor => 'w',   # Oeste (izquierda del texto)
+        -font   => 'Helvetica 9 bold',
+        -fill   => $label_fg,
+        -tags   => 'atr_last_label',
+    );
 }
 
-# Oculta el crosshair.
-sub hide_crosshair {
-    my ($self) = @_;
+# draw_crosshair(): Dibuja el crosshair sincronizado en el sub-panel del ATR.
+sub draw_crosshair {
+    my ($self, $x, $y) = @_;
+
     my $canvas = $self->{canvas};
-    return unless $canvas;
-    $canvas->itemconfigure('crosshair', -state => 'hidden');
+    return unless defined $canvas;
+
+    $canvas->delete('atr_crosshair');   # Borrar crosshair anterior
+
+    my ($width, $height) = $self->_canvas_size($canvas);
+
+    # Color del crosshair tomado del tema (con default seguro para tema claro).
+    my $crosshair_color = $self->{theme}{crosshair_line} // '#9598a1';
+
+    # Línea vertical (si tenemos X)
+    $canvas->createLine(
+        $x, 0, $x, $height,
+        -fill => $crosshair_color,
+        -dash => '.',      # Línea punteada
+        -tags => 'atr_crosshair',
+    ) if defined $x;
+
+    # Línea horizontal (si tenemos Y)
+    $canvas->createLine(
+        0, $y, $width, $y,
+        -fill => $crosshair_color,
+        -dash => '.',
+        -tags => 'atr_crosshair',
+    ) if defined $y;
 }
 
 1;
