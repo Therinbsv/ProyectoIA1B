@@ -2,7 +2,6 @@ package Market::Indicators::ATR;
 use strict;
 use warnings;
 
-# new(): Constructor de la clase. Recibe el período (ej: 14 para ATR 14).
 sub new {
     my ($class, $period) = @_;
     # Validación: el período debe ser un entero positivo.
@@ -11,22 +10,20 @@ sub new {
 
     # Estructura interna del objeto (hashref con claves privadas _algo).
     my $self = {
-        period      => $period,   # período del ATR (ej: 14)
-        values      => [],        # array donde guardaremos los ATR calculados (posiciones con undef durante warm-up)
-        _tr_sum     => 0,         # suma acumulada de True Ranges para el warm-up (solo primeras 'period' velas)
-        _last_close => undef,     # cierre de la vela anterior (necesario para calcular TR)
-        _last_atr   => undef,     # último ATR calculado (para la fórmula recursiva de Wilder)
+        period      => $period,   # período del ATR 
+        values      => [],        # array donde guardaremos los ATR calculados
+        _tr_sum     => 0,         # suma acumulada de True Ranges para el warm-up
+        _last_close => undef,     # cierre de la vela anterior
+        _last_atr   => undef,     # último ATR calculado
         _count      => 0,         # cuántas velas hemos procesado en total (para saber si estamos en warm-up, semilla o régimen normal)
     };
-    bless $self, $class;          # "bendecir" el hashref como objeto de esta clase
+    bless $self, $class;        
     return $self;
 }
 
 # update_last(): Procesa UNA nueva vela y actualiza el ATR incrementalmente (O(1)).
 sub update_last {
-    my ($self, $market_data, $index) = @_;
-    # O(1) por vela: solo lee una vela y actualiza estado incremental (Wilder).
-    # No itera el historial ni toca render/coordenadas (Req. 13.1, 13.2).
+    my ($self, $market_data, $index) = @_;.
 
     # Obtener la vela: si nos dieron índice, pedimos esa; si no, la última.
     my $candle = defined $index ? $market_data->get_candle($index) : $market_data->last_candle();
@@ -49,7 +46,6 @@ sub update_last {
         $tr = $hl;                                  # empezamos con el rango del día
         $tr = $hpc if $hpc > $tr;                   # actualizar si |high-prev| es mayor
         $tr = $lpc if $lpc > $tr;                   # actualizar si |low-prev| es mayor
-        # Al final $tr = max(hl, hpc, lpc)  (definición de True Range)
     } else {
         # Primera vela de la serie: TR = high - low (no hay cierre anterior)
         $tr = $high - $low;
@@ -87,18 +83,16 @@ sub update_last {
 }
 
 # get_values(): Devuelve la serie completa de ATR (arrayref).
-# Las posiciones durante el warm-up son undef, luego vienen los valores numéricos.
 sub get_values {
     my ($self) = @_;
     return $self->{values};
 }
 
 # reset(): Reinicia completamente el estado interno del indicador.
-# Se usa cuando cambiamos de timeframe (Req. 13.4) o cuando cargamos un nuevo símbolo.
 sub reset {
     my ($self) = @_;
     # Reinicia el estado incremental. Lo invoca IndicatorManager::reset_all al
-    # cambiar de timeframe; tras esto se recalcula vela por vela (Req. 13.4).
+    # cambiar de timeframe; tras esto se recalcula vela por vela 
     $self->{values}      = [];
     $self->{_tr_sum}     = 0;
     $self->{_last_close} = undef;

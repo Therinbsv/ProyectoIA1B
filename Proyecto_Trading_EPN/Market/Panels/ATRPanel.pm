@@ -9,11 +9,9 @@ sub new {
     # Creamos el objeto con todos los argumentos recibidos.
     my $self = {
         %args,
-        crosshair_objects => []   # Lista para guardar IDs de objetos del crosshair (aunque en este panel no se usa mucho)
+        crosshair_objects => []   # Lista para guardar IDs de objetos del crosshair 
     };
-    # El tema (paleta clara) se inyecta vía `theme => \%theme` desde ChartEngine.
-    # Garantizar robustez: si no llega, dejar un hashref vacío para que las lecturas
-    # posteriores (con defaults //) sean seguras.
+
     $self->{theme} = {} unless defined $self->{theme};
     bless $self, $class;
     return $self;
@@ -26,7 +24,6 @@ sub _init_crosshair {
 }
 
 # _canvas_size(): Obtiene el ancho y alto reales del canvas Tk.
-# Maneja diferentes formas de obtener la geometría.
 sub _canvas_size {
     my ($self, $canvas) = @_;
     my ($w, $h) = (0, 0);
@@ -44,8 +41,6 @@ sub _canvas_size {
 }
 
 # get_y_range(): Calcula el rango de valores visibles del ATR para escalar el eje Y.
-# Recibe una lista de valores (algunos pueden ser undef durante warm-up).
-# Devuelve (min, max) con un padding del 5%.
 sub get_y_range {
     my ($self, $visible_values) = @_;
 
@@ -92,8 +87,6 @@ sub render {
     $scale->{height} = $canvas_h;
 
     # Inyectar colores de eje del tema en la escala antes de dibujar el eje Y.
-    # La conversión datos↔píxeles sigue viviendo en Scales; aquí solo se le pasan
-    # los colores claros (con defaults seguros si el tema no está disponible).
     $scale->{grid_color}      = $self->{theme}{grid}      // '#e6e6e6';
     $scale->{axis_text_color} = $self->{theme}{axis_text} // '#363a45';
 
@@ -120,7 +113,7 @@ sub render {
 
     # Dibujar la línea si tenemos al menos 2 puntos (4 números en @points).
     if (@points >= 4) {
-        my $atr_color = $self->{theme}{atr_line} // '#2962ff';  # Azul por defecto
+        my $atr_color = $self->{theme}{atr_line} // '#2962ff';  
         $canvas->createLine(@points, -fill => $atr_color, -width => 1.5, -tags => 'atr_line');
         $canvas->raise('atr_line');  # Traer la línea al frente
     }
