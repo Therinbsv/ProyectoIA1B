@@ -1,131 +1,332 @@
 # Motor de Gráficos Financieros con Perl/Tk
 
-## Descripción
+**Plataforma interactiva de visualización de datos de mercado con análisis técnico en tiempo real.**
 
-Este proyecto implementa un motor de gráficos financieros interactivo en Perl con interfaz Tk. Permite visualizar datos de mercado en velas japonesas, calcular indicadores técnicos y ofrecer interacción en tiempo real con zoom, paneo y crosshair.
+## Idea Principal
 
-La aplicación está inspirada en el estilo de plataformas como TradingView y utiliza una arquitectura modular de cuatro capas para separar cálculo, datos, indicadores y renderizado.
+El proyecto implementa un motor de gráficos financieros profesional en Perl/Tk que replica capacidades analíticas de plataformas como TradingView. El flujo completo es:
 
-## Características principales
+1. **Cargar datos históricos** desde CSV con formato OHLCV (Open, High, Low, Close, Volume).
+2. **Agregar múltiples temporalidades** automáticamente (1 minuto, 5 minutos, 15 minutos) a partir de datos base.
+3. **Calcular indicadores técnicos** de forma desacoplada (ATR como primer indicador implementado).
+4. **Renderizar gráficos interactivos** con velas japonesas, ejes sincronizados y paneles especializados.
+5. **Ofrecer interacción en tiempo real** con zoom, paneo, crosshair y etiquetas dinámicas.
 
-- Visualización de velas japonesas (OHLC) a partir de datos CSV.
-- Panel de indicador ATR (Average True Range).
-- Temporalidades disponibles: `1m`, `5m`, `15m`.
-- Interacción de usuario:
-  - zoom horizontal con rueda del mouse
-  - paneo con arrastre
-  - crosshair sincronizado entre precio y ATR
-  - etiquetas dinámicas de precio y tiempo
-- Tema oscuro y diseño de interfaz inspirado en TradingView.
+## Pilares Fundamentales
 
-## Arquitectura del proyecto
+### 1) Arquitectura de Cuatro Capas
 
-El código está organizado en módulos que separan responsabilidades:
+El código está organizado en capas independientes para máxima mantenibilidad y reutilización:
 
-1. **Capa de datos**
-   - `Market/MarketData.pm`
-   - Maneja la carga, almacenamiento y agregación de datos OHLCV.
-   - Construye temporalidades `1m`, `5m` y `15m` a partir de la serie base.
-   - Calcula anclas temporales para el eje de tiempo.
+#### Capa de Datos (`Market/MarketData.pm`)
 
-2. **Capa de indicadores**
-   - `Market/IndicatorManager.pm`
-   - `Market/Indicators/ATR.pm`
-   - Registra y actualiza indicadores de forma desacoplada.
-   - Calcula el ATR incrementalmente sin depender del renderizado.
+- **Carga y normalización** de archivos CSV con formato OHLCV.
+- **Generación automática** de temporalidades: desde datos base (1m) genera 5m y 15m mediante agregación.
+- **Cálculo de anclas temporales** para ejes (timestamps, etiquetas horarias).
+- **Gestión eficiente de slices** de datos: proporciona ventanas visibles sin cargar todo en memoria.
 
-3. **Capa de renderizado**
-   - `Market/ChartEngine.pm`
-   - `Market/Panels/Scales.pm`
-   - `Market/Panels/PricePanel.pm`
-   - `Market/Panels/ATRPanel.pm`
-   - Convierte datos financieros en coordenadas de pantalla.
-   - Dibuja velas, ejes, panel ATR y objetos de interacción.
-   - Gestiona eventos de usuario y actualiza la vista.
+Como se acerca a condiciones reales de uso:
 
-4. **Capa de presentación**
-   - `market.pl`
-   - Inicializa los módulos, carga datos y arranca la aplicación Tk.
-   - Define el tema visual y los controles de la interfaz.
+- Parseado robusto de CSV con validación de campos.
+- Soporte para múltiples símbolos/activos simultáneamente.
+- Caché de agregaciones para evitar recálculos innecesarios.
+- Interfaz agnóstica respecto a origen de datos (CSV, base de datos, API).
 
-## Estructura de archivos
+#### Capa de Indicadores (`Market/IndicatorManager.pm` + `Market/Indicators/ATR.pm`)
 
-- `market.pl`
-  - Script principal que arranca la aplicación.
-  - Carga `Data/2026_03.csv` y prepara los datos.
+- **Registro desacoplado** de indicadores técnicos sin dependencias de UI.
+- **Cálculo incremental** del ATR usando método de Wilder para series de tiempo.
+- **Estado persistente** que permite reseteo sin necesidad de recalcular todo.
+- **Extensibilidad** clara para agregar nuevos indicadores (RSI, MACD, Bollinger Bands, etc.).
 
-- `Data/2026_03.csv`
-  - Datos históricos de precios para el gráfico.
+Indicadores implementados:
 
-- `Market/MarketData.pm`
-  - Gestión de datos OHLCV y generación de timeframes.
-  - Proporciona slices de datos para el render.
+- `ATR` (Average True Range): mide volatilidad en período configurable (default: 14 velas).
 
-- `Market/IndicatorManager.pm`
-  - Contenedor de indicadores técnicos.
-  - Actualiza los indicadores por cada vela.
+#### Capa de Renderizado (`Market/ChartEngine.pm` + `Market/Panels/*`)
 
-- `Market/Indicators/ATR.pm`
-  - Implementa el cálculo del ATR usando el método de Wilder.
-  - Mantiene estado incremental y puede resetearse.
+- **Sistema de coordenadas unificado** (`Market/Panels/Scales.pm`): convierte valores financieros a píxeles.
+- **Renderizado de precios** (`Market/Panels/PricePanel.pm`): dibuja velas, línea de cierre, etiquetas de valor.
+- **Renderizado de indicadores** (`Market/Panels/ATRPanel.pm`): gráficos separados de indicadores.
+- **Gestión centralizada** de zoom, paneo, viewport y eventos de usuario.
+- **Crosshair sincronizado** que atraviesa múltiples paneles manteniendo consistencia.
 
-- `Market/ChartEngine.pm`
-  - Orquesta el renderizado y la interacción.
-  - Calcula la ventana visible, el zoom, el paneo y el crosshair.
+#### Capa de Presentación (`market.pl`)
 
-- `Market/Panels/Scales.pm`
-  - Sistema de coordenadas y etiquetado de ejes.
-  - Convierte valores de precio a píxeles y dibuja grillas.
+- **Aplicación Tk** que orquesta las capas inferiores.
+- **Interfaz de usuario** con controles de temporalidad, vista y tema.
+- **Gestión de eventos** del mouse y teclado.
+- **Tema oscuro** inspirado en plataformas profesionales de trading.
 
-- `Market/Panels/PricePanel.pm`
-  - Renderiza las velas japonesas y muestra etiquetas de precio.
+### 2) Interacción Fluida y Profesional
 
-- `Market/Panels/ATRPanel.pm`
-  - Dibuja la línea del ATR y su etiqueta final.
+- **Zoom horizontal** con rueda del mouse: amplía/reduce tiempo visible sin afectar precio.
+- **Paneo con arrastre**: desplaza el historial manteniendo zoom actual.
+- **Crosshair sincronizado**: líneas verticales/horizontales que cruzan precio y ATR simultáneamente.
+- **Etiquetas dinámicas**: muestran precio exacto y hora en tooltips al mover el cursor.
+- **Reset vista**: vuelve instantáneamente a estado inicial.
+- **Temporalidades intercambiables**: cambio fluido entre 1m, 5m, 15m sin recargar datos.
 
-## Cómo ejecutar
+### 3) Diseño Visual Inspirado en TradingView
 
-1. Instala Perl y la biblioteca Tk en tu sistema.
-2. Abre una terminal en la carpeta del proyecto:
+- **Tema oscuro profesional** con colores contrastados para máxima legibilidad.
+- **Canvas sin bordes pesados**: interfaz limpia y moderna.
+- **Ejes separados**: precio (izquierda/derecha), tiempo (abajo), indicadores (panel inferior).
+- **Grillas y escalas** proporcionales automáticas según rango visible.
+- **Etiquetas finales** en margen derecho: últimos valores de precio y ATR siempre visibles.
+- **Barra de controles superior**: botones de temporalidad y acciones reunidos de forma accesible.
 
-```bash
-cd /home/ANAYOMI/Documentos/TradingProject
+### 4) Principios de Separación de Responsabilidades
+
+- **Indicadores sin UI**: `Market::Indicators::ATR` es puro cálculo, reutilizable en cualquier contexto.
+- **Renderizado agnóstico**: `Market::Panels::*` no conoce detalles de cálculo, solo datos de entrada/salida.
+- **ChartEngine como orquestador**: gestiona flujo de datos entre capas sin mezclar lógica.
+- **Extensibilidad clara**: agregar indicadores, paneles o interacciones no requiere tocar código existente.
+
+## Arquitectura (Resumen)
+
+```
+market.pl (Presentación Tk)
+    ↓
+Market/ChartEngine.pm (Orquestación)
+    ├─ Market/MarketData.pm (Datos OHLCV)
+    ├─ Market/IndicatorManager.pm (Indicadores)
+    │  └─ Market/Indicators/ATR.pm (Cálculo)
+    └─ Market/Panels/
+       ├─ Scales.pm (Coordenadas)
+       ├─ PricePanel.pm (Renderizado de velas)
+       └─ ATRPanel.pm (Renderizado de ATR)
 ```
 
-3. Ejecuta el proyecto:
+**Flujo de datos:**
+
+1. `market.pl` carga CSV mediante `MarketData::load_from_csv()`.
+2. `ChartEngine` obtiene datos visibles via `MarketData::get_slice_for_view()`.
+3. `IndicatorManager` recibe datos base y calcula ATR incrementalmente.
+4. Paneles especializados convierten datos a coordenadas (via `Scales`) y dibujan.
+5. Eventos de usuario (`zoom`, `pan`, etc.) actualizan `ChartEngine` y fuerzan redraw.
+
+## Estructura de Directorios
+
+```
+Proyecto_Trading_EPN/
+├── market.pl                      # Script principal (punto de entrada)
+├── Data/
+│   └── 2026_03.csv               # Dataset histórico OHLCV
+└── Market/
+    ├── MarketData.pm             # Capa de datos
+    ├── IndicatorManager.pm       # Gestor de indicadores
+    ├── ChartEngine.pm            # Orquestador de render
+    ├── Indicators/
+    │   └── ATR.pm                # Implementación de ATR
+    └── Panels/
+        ├── Scales.pm             # Sistema de coordenadas
+        ├── PricePanel.pm         # Panel de precios/velas
+        └── ATRPanel.pm           # Panel de indicador ATR
+```
+
+## Requisitos y Configuración
+
+### Dependencias
+
+- **Perl 5.20+**
+- **Tk** (interfaz gráfica)
+
+### Instalación de Dependencias
+
+#### En sistemas Linux/macOS:
 
 ```bash
+# Debian/Ubuntu
+sudo apt-get install perl tk
+
+# macOS (Homebrew)
+brew install perl tk
+```
+
+#### En Windows:
+
+Descarga **Strawberry Perl** desde [strawberryperl.com](https://strawberryperl.com) (incluye Tk).
+
+O instala CPAN módulos:
+
+```bash
+cpan Tk
+```
+
+## Cómo Ejecutar
+
+### Paso 1: Verificar instalación
+
+```bash
+perl -v
+perl -e 'use Tk; print "Tk OK\n"'
+```
+
+### Paso 2: Ejecutar la aplicación
+
+```bash
+cd Proyecto_Trading_EPN
 perl market.pl
 ```
 
-4. Si hay errores de librería, instala `Tk` en tu entorno Perl.
+### Paso 3: Solucionar problemas comunes
 
-## Uso
+Si obtienes error de módulo faltante:
 
-- Selecciona la temporalidad con los botones `1 Minuto`, `5 Minutos` y `15 Minutos`.
-- Utiliza la rueda del mouse para hacer zoom horizontal.
-- Arrastra el gráfico para mover el historial de precios.
-- Presiona `Reset Vista` para volver a la vista inicial.
+```bash
+# Instalar Tk via CPAN
+perl -MCPAN -e 'install Tk'
+```
 
-## Mejoras visuales implementadas
+Si la ventana no aparece (servidor X en Linux remoto):
 
-- Tema oscuro inspirado en TradingView.
-- Barra de controles superior con estilo moderno.
-- Canvas planos y sin bordes pesados.
-- Ejes separados para precio, tiempo y ATR.
-- Etiquetas de precio y últimos valores en el margen derecho.
+```bash
+export DISPLAY=:0
+perl market.pl
+```
 
-## Notas de diseño
+## Uso Detallado
 
-- La capa de indicadores está separada del renderizado.
-- `Market::Indicators::ATR` no depende de Tk ni de la UI.
-- `Market::Panels::Scales` asegura consistencia en la conversión de datos a píxeles.
-- `Market::ChartEngine` actúa como orquestador, sin mezclar lógica de cálculo con lógica de presentación.
+### Controles de Temporalidad
 
-## Futuras mejoras recomendadas
+- Presiona botón **`1 Minuto`**: cambia a vista de 1 minuto.
+- Presiona botón **`5 Minutos`**: cambia a vista de 5 minutos.
+- Presiona botón **`15 Minutos`**: cambia a vista de 15 minutos.
 
-- Agregar selección de símbolo o panel lateral.
-- Añadir más indicadores técnicos.
-- Soporte de datos en tiempo real.
-- Cambio de tema claro/oscuro desde la interfaz.
-- Mejora de la barra superior con iconos y menús.
+El cambio es instantáneo; los datos ya están precalculados en memoria.
+
+### Interacción con el Gráfico
+
+| Acción | Efecto |
+|--------|--------|
+| **Rueda del mouse (arriba/abajo)** | Zoom horizontal (amplía/reduce tiempo visible) |
+| **Arrastrar con click izquierdo** | Paneo horizontal (desplaza el historial) |
+| **Mover cursor** | Crosshair sigue posición; muestra etiquetas de precio/hora |
+| **Presionar `Reset Vista`** | Vuelve a vista inicial (zoom out completo) |
+
+### Interpretación del Gráfico
+
+- **Panel superior**: velas japonesas con precios OHLC.
+- **Panel inferior**: ATR (volatilidad). Valores altos = mercado volátil; bajos = mercado tranquilo.
+- **Eje izquierdo/derecho**: escala de precios (auto-ajustada al zoom).
+- **Eje inferior**: timeline con etiquetas horarias.
+- **Línea vertical roja (crosshair)**: indica posición del cursor.
+- **Etiquetas finales (margen derecho)**: último precio y ATR de la vela más reciente.
+
+## Notas de Diseño
+
+### Separación de Capas
+
+La arquitectura permite agregar nuevas capacidades sin afectar código existente:
+
+- **Nuevo indicador**: crea archivo en `Market/Indicators/MiIndicador.pm`, registra en `IndicatorManager.pm`.
+- **Nuevo tipo de panel**: crea archivo en `Market/Panels/MiPanel.pm`, añade a `ChartEngine.pm`.
+- **Nuevo origen de datos**: extiende `MarketData.pm` con método `load_from_api()` o similar.
+- **Nueva interacción**: maneja en `ChartEngine.pm` sin tocar módulos de cálculo.
+
+### Decisiones Clave de Implementación
+
+1. **ATR incremental**: evita recalcular todo al agregar vela nueva.
+2. **Caché de timeframes**: 1m → 5m y 15m se calculan una sola vez.
+3. **Escalas proporcionales**: ejes se ajustan automáticamente al zoom para máxima legibilidad.
+4. **Crosshair sincronizado**: un solo evento de mouse actualiza múltiples paneles simultáneamente.
+5. **Canvas sin re-crear**: se redibuja en lugar de re-crear objetos (mejor performance).
+
+### Principios Generales
+
+- **Cálculo antes de render**: indicadores se actualizan antes de cualquier drawing.
+- **Sin estado compartido**: cada módulo maneja su propio estado claramente.
+- **Interfaces explícitas**: cada módulo exporta sólo lo necesario (métodos públicos claros).
+- **Tests de entrada**: validación de CSV, rango de precios, timestamps válidos.
+
+## Estructura de Datos
+
+### Formato CSV esperado
+
+```
+timestamp,open,high,low,close,volume
+2026-03-01 00:00:00,150.50,151.00,150.25,150.80,1000
+2026-03-01 00:01:00,150.80,151.20,150.70,150.95,1200
+...
+```
+
+Campos:
+- `timestamp`: fecha/hora en formato ISO 8601 (YYYY-MM-DD HH:MM:SS)
+- `open`, `high`, `low`, `close`: precios en valores reales
+- `volume`: cantidad transaccionada
+
+### Estructura de Vela (Candle)
+
+```perl
+{
+    timestamp => '2026-03-01 00:00:00',
+    open      => 150.50,
+    high      => 151.00,
+    low       => 150.25,
+    close     => 150.80,
+    volume    => 1000
+}
+```
+
+## Futuras Mejoras Recomendadas
+
+### Corto Plazo
+
+- [ ] Agregar más indicadores técnicos (RSI, MACD, Bollinger Bands).
+- [ ] Soporte para selección múltiple de símbolos/activos.
+- [ ] Persitencia de zoom/paneo (guardar estado entre sesiones).
+- [ ] Exportación de gráficos a PNG/PDF.
+
+### Mediano Plazo
+
+- [ ] Datos en tiempo real (conexión WebSocket a feed de mercado).
+- [ ] Panel lateral con selección de símbolo y timeframe avanzada.
+- [ ] Tema claro/oscuro intercambiable desde interfaz.
+- [ ] Herramientas de drawing (líneas de soporte/resistencia).
+- [ ] Alertas de precio configurables.
+
+### Largo Plazo
+
+- [ ] Gestor de portafolio integrado.
+- [ ] Backtesting de estrategias.
+- [ ] API REST para integración con servicios externos.
+- [ ] Soporte para múltiples frames simultáneamente.
+- [ ] Análisis de volumen avanzado (profile, footprint).
+
+## Flujo de Desarrollo Recomendado
+
+Para desarrolladores que deseen extender el proyecto:
+
+```bash
+# 1. Entender la estructura actual
+less market.pl
+less Market/ChartEngine.pm
+
+# 2. Agregar nuevo indicador
+cp Market/Indicators/ATR.pm Market/Indicators/MiIndicador.pm
+# Editar: implementar lógica de cálculo
+# Editar: Market/IndicatorManager.pm para registrarlo
+
+# 3. Agregar nuevo panel (opcional)
+cp Market/Panels/ATRPanel.pm Market/Panels/MiPanel.pm
+# Editar: implementar lógica de render
+# Editar: Market/ChartEngine.pm para agregarlo
+
+# 4. Probar
+perl market.pl
+# Verificar interacción y renderizado
+
+# 5. Documentar cambios en este README
+```
+
+## Contribuciones
+
+Este proyecto es un MVP de análisis técnico. Contribuciones enfocadas en:
+
+- Nuevos indicadores (mantener patrón de `Market::Indicators::*`)
+- Mejoras de performance en render (Tk Canvas optimization)
+- Refactorización de `ChartEngine` (si crece más de 500 líneas)
+- Documentación de uso avanzado
+
+son bienvenidas.
