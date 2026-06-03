@@ -1,6 +1,7 @@
-package Market::ChartEngine;  # Declara el paquete/namespace del módulo
-use strict;                   # Obliga a declarar variables con 'my' (buena práctica)
-use warnings;                 # Muestra advertencias para evitar errores comunes
+package Market::ChartEngine;  
+use strict;                   
+use warnings; 
+use utf8;                
 
 use Time::Moment;             # Módulo para manejar fechas/horas de forma robusta
 use Market::Panels::Scales;   # Nuestro sistema de coordenadas (datos ↔ píxeles)
@@ -11,49 +12,52 @@ use Market::Panels::ATRPanel;     # Panel que dibuja la línea del ATR
 use constant {
     RIGHT_MARGIN     => 0,       # Margen derecho del área de ploteo (0 porque hay canvas separados)
     MIN_VISIBLE_BARS => 2,       # Mínimo de velas visibles (Req. 8, 10)
-    MAX_VISIBLE_BARS => 300,     # Máximo de velas visibles
+    MAX_VISIBLE_BARS => 800,     # Máximo de velas visibles
+    DEFAULT_BARS     => 120,     # Número de velas visibles por defecto (zoom inicial)
     ZOOM_STEP        => 5,       # Barras por paso de rueda en zoom horizontal
     CTRL_MASK        => 0x0004,  # Máscara para detectar Ctrl presionado (X11)
     TIME_AXIS_DRAG_PX_PER_BAR => 8,  # Píxeles por barra en arrastre del eje temporal
+    PRICE_TICK_SIZE  => 0.25,  # Tamaño del tick de precio para redondear (ajustable según el mercado)
 };
 
-# ============================================================================
-# _default_theme: Paleta de tema claro por defecto
-# ============================================================================
-
-sub _default_theme {
+# TEMAS: Funciones para obtener paletas de colores 
+sub _dark_theme {
     return {
-        bg             => '#ffffff',   # Fondo blanco
-        grid           => '#e6e6e6',   # Líneas de grid gris muy claro
-        date_grid      => '#c4c9d1',   # Líneas de cambio de día gris suave
-        axis_text      => '#363a45',   # Texto de ejes gris oscuro
-        bull           => '#26a69a',   # Verde para velas alcistas
-        bear           => '#ef5350',   # Rojo para velas bajistas
-        atr_line       => '#2962ff',   # Azul para la línea ATR
-        crosshair_line => '#9598a1',   # Gris para el crosshair
-        label_bg       => '#363a45',   # Fondo oscuro para etiquetas
-        label_fg       => '#ffffff',   # Texto blanco en etiquetas
-        last_price_bg  => '#363a45',   # Fondo del último precio (por defecto oscuro)
-        last_price_fg  => '#ffffff',   # Texto del último precio (blanco)
+        name           => 'dark',
+        bg             => '#1e1e2f',        # Fondo muy oscuro
+        grid           => '#2a2a3e',        # Grid gris oscuro
+        date_grid      => '#3a3a4e',        # Líneas de días
+        axis_text      => '#a8aacb',        # Texto gris claro
+        bull           => '#00d97d',        # Verde vibrante
+        bear           => '#f6465d',        # Rojo vibrante
+        atr_line       => '#1f77ff',        # Azul vibrante
+        crosshair_line => '#808080',        # Gris para crosshair
+        label_bg       => '#2a2a3e',        # Fondo etiquetas
+        label_fg       => '#a8aacb',        # Texto etiquetas
+        last_price_bg  => '#2a2a3e',        # Fondo último precio
+        last_price_fg  => '#a8aacb',        # Texto último precio
+        wick_bull      => '#00d97d',        # Mechas verdes
+        wick_bear      => '#f6465d',        # Mechas rojas
+        volume_bull    => '#00d97d80',      # Volumen alcista con transparencia
+        volume_bear    => '#f6465d80',      # Volumen bajista con transparencia
     };
 }
 
-# ============================================================================
 # new(): Constructor de ChartEngine
-# ============================================================================
 sub new {
-    my ($class, %args) = @_;   # $class es 'Market::ChartEngine', %args son los parámetros named
-
-    # Creamos el objeto como un hashref con valores por defecto
+    my ($class, %args) = @_;   
     my $self = {
         # Datos e indicadores (inyectados desde fuera)
         market_data      => $args{market_data},       # Objeto con los precios
         indicator_manager=> $args{indicator_manager}, # Contenedor de indicadores
         price_canvas     => $args{price_canvas},      # Canvas para velas
         atr_canvas       => $args{atr_canvas},        # Canvas para ATR
-        
-        # Estado del zoom/scroll horizontal
-        visible_bars     => 60,    # Cuántas velas se ven inicialmente (zoom por defecto)
+        price_axis_canvas => $args{price_axis_canvas},
+        atr_axis_canvas   => $args{atr_axis_canvas},
+        time_axis_canvas  => $args{time_axis_canvas},
+
+         # Estado del zoom/scroll horizontal
+        visible_bars     => DEFAULT_BARS,    # Cuántas velas se ven inicialmente (zoom por defecto)
         offset           => 0,     # Desplazamiento desde la derecha (0 = mostrar las más recientes)
         
         # Escala del eje Y (precios)
@@ -63,32 +67,74 @@ sub new {
         
         # Control de render diferido (coalescing)
         render_pending   => 0,     # Flag: 1 si ya hay un render programado
+
+    
+        # Callback for scale mode changes
+        scale_mode_callback => $args{scale_mode_callback},
+
+        # Ctrl+Zoom state (nuevo de V2)
+        ctrl_zoom_x_shift     => 0,
+        ctrl_zoom_y_lock_min  => undef,
+        ctrl_zoom_y_lock_max  => undef,
+        
+        # Chart mode: 'automatic' o 'manual'
+        # Automático: solo scroll horizontal, escala Y automática
+        # Manual: control total sobre X e Y
+        chart_mode       => 'automatic',
         
         # Estado para arrastre horizontal (scroll con botón izquierdo)
         drag_start_x     => undef, # X inicial del arrastre (en píxeles)
         drag_start_y     => undef, # Y inicial del arrastre
         drag_start_offset=> 0,     # Offset al comenzar el arrastre
+        drag_start_min_y  => undef,
+        drag_start_max_y  => undef,
+        drag_cursor_canvas=> undef,
         
         # Estado para arrastre del eje Y (zoom vertical manual)
         axis_drag_start_y=> undef, # Y inicial del arrastre en el eje lateral
         axis_drag_min_y  => undef, # Mínimo Y al comenzar el arrastre
         axis_drag_max_y  => undef, # Máximo Y al comenzar el arrastre
         
-        vertical_drag_y  => undef, # (Parece no usarse, quizás legacy)
+        # Estado para arrastre del eje Y (zoom vertical manual - ATR)
+        atr_axis_drag_start_y => undef,
+        atr_axis_drag_min_y   => undef,
+        atr_axis_drag_max_y   => undef,
+        atr_manual_min_y      => undef,
+        atr_manual_max_y      => undef,
+        atr_is_auto_scale     => 1,
+
+        # Time axis drag
+        time_axis_drag_start_x => undef,
+        time_axis_drag_visible => undef,
         
-        # Sobrescribir con cualquier argumento adicional que haya llegado
-        %args,
+        # Mouse state
+        last_mouse_x      => undef,
+        last_mouse_y      => undef,
+        active_canvas     => undef,
+        
+        # Resize debounce
+        _resize_pending   => 0,
+        _printed_render_diag => 0,
+        
+        # Theme (DARK por defecto)
+        theme_name        => $args{theme_name} // 'dark',
+        
+        %args,  
     };
     bless $self, $class;   # "Bendecir" el hashref como objeto de la clase
 
-    # Tema claro: si nos dieron un theme lo usamos, si no, usamos el default
     # El tema viaja dentro de la instancia, nunca como variable global.
-    $self->{theme} = $args{theme} || _default_theme();
+    if ($args{theme}) {
+        $self->{theme} = $args{theme};
+    } elsif ($args{dark_mode}) {
+        $self->{theme} = _dark_theme();
+    } 
 
     # Crear el panel de precios (inyectando canvas y tema)
     $self->{price_panel} = Market::Panels::PricePanel->new(
         canvas => $self->{price_canvas},
         theme  => $self->{theme},
+        tick_size => $self->{tick_size},
     );
     
     # Crear el panel de ATR (inyectando canvas y tema)
@@ -103,9 +149,7 @@ sub new {
     return $self;   # Devolver el objeto recién creado
 }
 
-# ============================================================================
 # compute_window: Calcula los índices GLOBALES de inicio y fin de la ventana visible
-# ============================================================================
 sub compute_window {
     my ($self) = @_;
     
@@ -115,7 +159,6 @@ sub compute_window {
     # Si no hay datos, devolver (0, -1) que indica ventana vacía
     return (0, -1) if !$total_candles || $total_candles <= 0;
 
-    # Ajustar visible_bars si es menor que el mínimo permitido
     if ($total_candles >= MIN_VISIBLE_BARS) {
         # Si tenemos suficientes velas, aseguramos que visible_bars sea al menos MIN_VISIBLE_BARS
         $self->{visible_bars} = MIN_VISIBLE_BARS if $self->{visible_bars} < MIN_VISIBLE_BARS;
@@ -134,7 +177,6 @@ sub compute_window {
     $self->{offset} = $self->_clamp_offset($self->{offset});
 
     # Calcular el índice de la última vela visible (más a la derecha)
-    # offset=0 → última vela real; offset=1 → penúltima, etc.
     my $end_idx = $total_candles - 1 - $self->{offset};
     
     # Calcular el índice de la primera vela visible (más a la izquierda)
@@ -143,9 +185,7 @@ sub compute_window {
     return ($start_idx, $end_idx);
 }
 
-# ============================================================================
 # round: Redondea al entero más cercano (funciona con números positivos y negativos)
-# ============================================================================
 sub round {
     my ($self, $value) = @_;
 
@@ -155,9 +195,7 @@ sub round {
     return int($value + ($value >= 0 ? 0.5 : -0.5));
 }
 
-# ============================================================================
 # _max_offset_for_visible: Máximo offset permitido (scroll hacia la izquierda)
-# ============================================================================
 sub _max_offset_for_visible {
     my ($self) = @_;
 
@@ -168,27 +206,21 @@ sub _max_offset_for_visible {
     return ($total - MIN_VISIBLE_BARS) > 0 ? ($total - MIN_VISIBLE_BARS) : 0;
 }
 
-# ============================================================================
 # _min_offset_for_visible: Mínimo offset permitido (scroll hacia la derecha)
-# ============================================================================
 sub _min_offset_for_visible {
     my ($self) = @_;
 
     my $total = $self->{market_data}->size() || 0;
     return 0 if $total < MIN_VISIBLE_BARS;   # Si hay pocas velas, offset mínimo = 0
 
-    # visible_bars no puede ser menor que MIN_VISIBLE_BARS
     my $visible = $self->{visible_bars} || MIN_VISIBLE_BARS;
     $visible = $total if $visible > $total;   # No puede superar el total
 
-    # Si visible > MIN_VISIBLE_BARS, el offset mínimo es negativo
     # Representa cuántas velas "futuras" podemos mostrar a la izquierda
     return -(($visible > MIN_VISIBLE_BARS) ? ($visible - MIN_VISIBLE_BARS) : 0);
 }
 
-# ============================================================================
 # _clamp_offset: Acota el offset dentro de los límites permitidos
-# ============================================================================
 sub _clamp_offset {
     my ($self, $offset) = @_;
 
@@ -200,28 +232,22 @@ sub _clamp_offset {
     return $offset;
 }
 
-# ============================================================================
 # _pad_visible_slice: Rellena un slice con 'undef' para que tenga el tamaño exacto
-# ============================================================================
 sub _pad_visible_slice {
     my ($self, $slice, $start, $end) = @_;
 
-    return unless $slice;   # Si no hay slice, no hacer nada
-    # Calcular cuántos elementos debería tener
+    return unless $slice;   
     my $target = defined $start && defined $end && $end >= $start ? $end - $start + 1 : 0;
     # Si el slice actual es más corto, añadir undef hasta alcanzar el tamaño deseado
     push @$slice, (undef) x ($target - @$slice) if $target > @$slice;
 }
 
-# ============================================================================
 # _canvas_width: Obtiene el ancho de un canvas Tk de forma robusta
-# ============================================================================
 sub _canvas_width {
     my ($self, $canvas) = @_;
     return 1 unless $canvas;   # Si no hay canvas, devolver 1
 
     my $w = 0;
-    # Intentar obtener geometría con geometry()
     my $geom = eval { $canvas->geometry() };
     if (defined $geom && $geom =~ /^(\d+)x\d+/) {
         $w = $1;   # Extraer el ancho (primer número antes de la 'x')
@@ -231,9 +257,7 @@ sub _canvas_width {
     return $w > 1 ? $w : 1;   # Asegurar que sea al menos 1
 }
 
-# ============================================================================
 # _canvas_size: Obtiene ancho y alto de un canvas Tk
-# ============================================================================
 sub _canvas_size {
     my ($self, $canvas) = @_;
     return (1, 1) unless $canvas;   # Si no hay canvas, devolver (1,1)
@@ -249,9 +273,7 @@ sub _canvas_size {
     return ($w, $h);
 }
 
-# ============================================================================
 # _reset_canvas_view: Reinicia la vista de un canvas (scrollregion, etc.)
-# ============================================================================
 sub _reset_canvas_view {
     my ($self, $canvas) = @_;
     return unless $canvas;   # Si no hay canvas, salir
@@ -264,34 +286,40 @@ sub _reset_canvas_view {
     eval { $canvas->configure(-scrollregion => [0, 0, $w, $h]) };
 }
 
-# ============================================================================
 # request_render: Programa un render diferido (coalescing)
-# ============================================================================
+# request_render: Programa un render diferido (VERSIÓN CORREGIDA)
 sub request_render {
     my ($self) = @_;
 
-    # Si ya hay un render pendiente, no programar otro
     return if $self->{render_pending};
-    $self->{render_pending} = 1;   # Marcar que hay un render programado
+    $self->{render_pending} = 1;
+    
+    # Guardar el estado del mouse ANTES del render diferido
+    my $saved_mouse_x = $self->{last_mouse_x};
+    my $saved_mouse_y = $self->{last_mouse_y};
+    my $saved_active = $self->{active_canvas};
 
-    # Elegir un canvas para programar el 'after' (timer)
     my $canvas = $self->{price_canvas} || $self->{atr_canvas};
     if ($canvas) {
-        # Programar render después de 20 milisegundos
         $canvas->after(20, sub {
-            $self->{render_pending} = 0;   # Limpiar flag
-            $self->render();               # Ejecutar render
+            $self->{render_pending} = 0;
+            $self->render();
+            
+            # RESTAURAR el estado del mouse después del render
+            if (defined $saved_mouse_x) {
+                $self->{last_mouse_x} = $saved_mouse_x;
+                $self->{last_mouse_y} = $saved_mouse_y if defined $saved_mouse_y;
+                $self->{active_canvas} = $saved_active if defined $saved_active;
+                $self->_draw_crosshair_all();
+            }
         });
     } else {
-        # Si no hay canvas, renderizar inmediatamente (caso de pruebas)
         $self->{render_pending} = 0;
         $self->render();
     }
 }
 
-# ============================================================================
 # render: MÉTODO PRINCIPAL de dibujo (el corazón del motor gráfico)
-# ============================================================================
 sub render {
     my ($self) = @_;
     
@@ -302,21 +330,20 @@ sub render {
     my $visible_candles = $self->{market_data}->get_slice($start, $end);
     my $visible_atr     = $self->{indicator_manager}->slice_array('ATR', $start, $end);
     
-    # Asegurar que los slices tengan el tamaño correcto (rellenar con undef si falta)
+    # Asegurar que los slices tengan el tamaño correcto
     $self->_pad_visible_slice($visible_candles, $start, $end);
     $self->_pad_visible_slice($visible_atr, $start, $end);
     
     # 3. Calcular rangos de precios e indicadores para construir escalas dinámicas
-    #    price_panel->get_y_range devuelve (min_precio, max_precio) con padding del 2%
-    #    atr_panel->get_y_range devuelve (min_atr, max_atr) con padding del 5%
     my ($min_p, $max_p) = $self->{price_panel}->get_y_range($visible_candles);
     my ($min_a, $max_a) = $self->{atr_panel}->get_y_range($visible_atr);
     
-    # Si estamos en modo manual (is_auto_scale=0), usar los valores manuales
-    if (!$self->{is_auto_scale} && defined $self->{manual_min_y} && defined $self->{manual_max_y}) {
+    # Si estamos en modo manual, usar los valores manuales
+    if (defined $self->{ctrl_zoom_y_lock_min} && defined $self->{ctrl_zoom_y_lock_max}) {
+        ($min_p, $max_p) = ($self->{ctrl_zoom_y_lock_min}, $self->{ctrl_zoom_y_lock_max});
+    } elsif (!$self->{is_auto_scale} && defined $self->{manual_min_y} && defined $self->{manual_max_y}) {
         ($min_p, $max_p) = ($self->{manual_min_y}, $self->{manual_max_y});
     } else {
-        # En modo automático, guardamos los rangos calculados por si cambiamos a manual
         ($self->{manual_min_y}, $self->{manual_max_y}) = ($min_p, $max_p);
     }
 
@@ -326,25 +353,31 @@ sub render {
         $max_p = 30000;
     }
     if (!defined $min_a || !defined $max_a || $min_a == $max_a) {
-        $min_a = 0;       # ATR mínimo por defecto
-        $max_a = 100;     # ATR máximo por defecto
+        $min_a = 0;
+        $max_a = 100;
+    }
+
+    # Aplicar override manual del ATR si existe (zoom/pan independiente)
+    if (!$self->{atr_is_auto_scale} && defined $self->{atr_manual_min_y} && defined $self->{atr_manual_max_y}) {
+        ($min_a, $max_a) = ($self->{atr_manual_min_y}, $self->{atr_manual_max_y});
+    } else {
+        # Modo automático: actualizar los valores manuales con el rango calculado
+        ($self->{atr_manual_min_y}, $self->{atr_manual_max_y}) = ($min_a, $max_a);
     }
     
     # 4. Instanciar los sistemas de coordenadas (Scales)
-    #    La escala X usa un ancho compartido para que PricePanel y ATRPanel
-    #    queden sincronizados barra por barra.
     my ($price_w, $price_h) = $self->_canvas_size($self->{price_canvas});
     my ($atr_w, $atr_h)     = $self->_canvas_size($self->{atr_canvas});
     my $shared_w = $price_w;   # Ambos paneles usan el mismo ancho para el eje X
 
-    # Resetear las vistas de los canvases (evitar scroll regions mal configuradas)
+    # Resetear las vistas de los canvases 
     $self->_reset_canvas_view($self->{price_canvas});
     $self->_reset_canvas_view($self->{atr_canvas});
     $self->_reset_canvas_view($self->{price_axis_canvas});
     $self->_reset_canvas_view($self->{atr_axis_canvas});
     $self->_reset_canvas_view($self->{time_axis_canvas});
 
-    # Mensaje de diagnóstico (solo la primera vez)
+    # Mensaje de diagnóstico 
     if (!$self->{_printed_render_diag}) {
         print "[*] Render geometry: price=${price_w}x${price_h} atr=${atr_w}x${atr_h} window=$start-$end bars=" . scalar(@$visible_candles) . "\n";
         $self->{_printed_render_diag} = 1;
@@ -369,9 +402,11 @@ sub render {
     $price_scale->{draw_labels} = $self->{price_axis_canvas} ? 0 : 1;
     $price_scale->{draw_last_label} = $self->{price_axis_canvas} ? 0 : 1;
     $price_scale->{draw_crosshair_label} = $self->{price_axis_canvas} ? 0 : 1;
+    $price_scale->{x_shift} = $self->{ctrl_zoom_x_shift} || 0;
     $atr_scale->{draw_labels} = $self->{atr_axis_canvas} ? 0 : 1;
     $atr_scale->{draw_last_label} = $self->{atr_axis_canvas} ? 0 : 1;
-    
+    $atr_scale->{x_shift} = $self->{ctrl_zoom_x_shift} || 0;
+
     # Asignar las escalas a los paneles
     $self->{price_panel}->set_scale($price_scale);
     $self->{atr_panel}->set_scale($atr_scale);
@@ -390,9 +425,7 @@ sub render {
     $self->_render_time_axis($price_scale, $time_labels);
 }
 
-# ============================================================================
 # _render_price_axis: Dibuja el eje Y lateral del panel de precios
-# ============================================================================
 sub _render_price_axis {
     my ($self, $source_scale, $visible_candles) = @_;
 
@@ -403,24 +436,24 @@ sub _render_price_axis {
     $canvas->delete('y_scale');           # Borrar etiquetas anteriores
     $canvas->delete('axis_last_price');   # Borrar etiqueta del último precio
 
-    # Crear una escala para el eje Y (solo una barra, porque es solo para valores)
+    # Crear una escala para el eje Y 
     my $axis_scale = Market::Panels::Scales->new(
         min_y        => $source_scale->{min_y},
         max_y        => $source_scale->{max_y},
-        bars         => 1,               # Solo una barra (no necesitamos coordenadas X)
+        bars         => 1,               # Solo una barra
         right_margin => 0,
     );
     $axis_scale->{width}           = $w;
     $axis_scale->{height}          = $source_scale->{height} || $h;
     $axis_scale->{draw_grid}       = 0;   # No dibujar líneas de grid en el eje lateral
     $axis_scale->{draw_labels}     = 1;   # Sí dibujar etiquetas numéricas
-    $axis_scale->{label_x}         = 4;   # Posición X para el texto (4 píxeles desde la izquierda)
+    $axis_scale->{label_x}         = 4;   # Posición X para el texto
     $axis_scale->{label_anchor}    = 'w'; # Anclaje 'w' = oeste (izquierda)
-    $axis_scale->{grid_color}      = $self->{theme}{grid}      // '#e6e6e6';
-    $axis_scale->{axis_text_color} = $self->{theme}{axis_text} // '#363a45';
+    $axis_scale->{grid_color}      = $self->{theme}{grid}      // '#e7dfdb';
+    $axis_scale->{axis_text_color} = $self->{theme}{axis_text} // '#373544';
     $axis_scale->_draw_y_scale($canvas);   # Dibujar el eje Y
 
-    # Encontrar la última vela definida (para mostrar su precio de cierre)
+    # Encontrar la última vela definida
     return unless $visible_candles && @$visible_candles;
     my $last_candle;
     for my $candle (@$visible_candles) {
@@ -436,8 +469,8 @@ sub _render_price_axis {
     my $label = sprintf('%.2f', $close);
     # Color de fondo: verde para alcista, rojo para bajista
     my $bg = (defined $open && $close >= $open)
-        ? ($self->{theme}{bull} // '#26a69a')
-        : ($self->{theme}{bear} // '#ef5350');
+        ? ($self->{theme}{bull} // '#1daba7')
+        : ($self->{theme}{bear} // '#ee423f');
     my $fg = $self->{theme}{last_price_fg} // '#ffffff';
 
     # Dibujar rectángulo de fondo y texto del último precio
@@ -445,35 +478,38 @@ sub _render_price_axis {
     $canvas->createText(4, $y, -text => $label, -anchor => 'w', -font => 'Helvetica 9 bold', -fill => $fg, -tags => 'axis_last_price');
 }
 
-# ============================================================================
+
+
 # _draw_price_axis_crosshair: Dibuja el crosshair en el eje lateral de precios
-# ============================================================================
 sub _draw_price_axis_crosshair {
     my ($self, $y) = @_;
 
     my $canvas = $self->{price_axis_canvas};
     return unless $canvas;
 
-    $canvas->delete('axis_crosshair');   # Borrar crosshair anterior
-    return unless defined $y;             # Si no hay Y, no dibujar
+    $canvas->delete('axis_crosshair');
+    return unless defined $y;
 
     my $scale = $self->{price_panel} ? $self->{price_panel}->{scale} : undef;
     return unless $scale;
 
     my ($w, undef) = $self->_canvas_size($canvas);
-    my $value = $scale->y_to_value($y);   # Convertir Y a precio
+    my $raw_value = $scale->y_to_value($y);
+
+    # Redondear al tick más cercano (0.25)
+    my $tick = $self->{tick_size} // PRICE_TICK_SIZE;
+    my $value = int($raw_value / $tick + 0.5) * $tick;
+
     my $label = sprintf('%.2f', $value);
-    my $bg = $self->{theme}{label_bg} // '#363a45';
+    my $bg = $self->{theme}{label_bg} // '#343e45';
     my $fg = $self->{theme}{label_fg} // '#ffffff';
 
-    # Dibujar rectángulo y texto en el eje lateral
     $canvas->createRectangle(0, $y - 8, $w, $y + 8, -fill => $bg, -outline => $bg, -tags => 'axis_crosshair');
     $canvas->createText(4, $y, -text => $label, -anchor => 'w', -font => 'Helvetica 9 bold', -fill => $fg, -tags => 'axis_crosshair');
 }
 
-# ============================================================================
 # _draw_atr_axis_crosshair: Dibuja el crosshair en el eje lateral del ATR
-# ============================================================================
+
 sub _draw_atr_axis_crosshair {
     my ($self, $y) = @_;
 
@@ -489,16 +525,14 @@ sub _draw_atr_axis_crosshair {
     my ($w, undef) = $self->_canvas_size($canvas);
     my $value = $scale->y_to_value($y);   # Convertir Y a valor ATR
     my $label = sprintf('%.4f', $value);  # ATR tiene más decimales
-    my $bg = $self->{theme}{label_bg} // '#363a45';
+    my $bg = $self->{theme}{label_bg} // '#343e45';
     my $fg = $self->{theme}{label_fg} // '#ffffff';
 
     $canvas->createRectangle(0, $y - 8, $w, $y + 8, -fill => $bg, -outline => $bg, -tags => 'atr_axis_crosshair');
     $canvas->createText(4, $y, -text => $label, -anchor => 'w', -font => 'Helvetica 9 bold', -fill => $fg, -tags => 'atr_axis_crosshair');
 }
 
-# ============================================================================
-# _render_time_axis: Dibuja el eje temporal inferior (con etiquetas de tiempo)
-# ============================================================================
+# _render_time_axis: Dibuja el eje temporal inferior 
 sub _render_time_axis {
     my ($self, $source_scale, $labels) = @_;
 
@@ -521,9 +555,7 @@ sub _render_time_axis {
     $self->{price_panel}->{scale} = $old_scale;
 }
 
-# ============================================================================
 # _render_atr_axis: Dibuja el eje Y lateral del panel ATR
-# ============================================================================
 sub _render_atr_axis {
     my ($self, $source_scale, $visible_atr) = @_;
 
@@ -546,8 +578,8 @@ sub _render_atr_axis {
     $axis_scale->{draw_labels}     = 1;
     $axis_scale->{label_x}         = 4;
     $axis_scale->{label_anchor}    = 'w';
-    $axis_scale->{grid_color}      = $self->{theme}{grid}      // '#e6e6e6';
-    $axis_scale->{axis_text_color} = $self->{theme}{axis_text} // '#363a45';
+    $axis_scale->{grid_color}      = $self->{theme}{grid}      // '#e7dfdb';
+    $axis_scale->{axis_text_color} = $self->{theme}{axis_text} // '#373544';
     $axis_scale->_draw_y_scale($canvas);
 
     # Encontrar el último valor ATR definido
@@ -567,9 +599,7 @@ sub _render_atr_axis {
     $canvas->createText(4, $y, -text => $label, -anchor => 'w', -font => 'Helvetica 9 bold', -fill => $fg, -tags => 'atr_axis_last');
 }
 
-# ============================================================================
 # _bind_all_canvas: Conecta TODOS los eventos de Tk a los canvases
-# ============================================================================
 sub _bind_all_canvas {
     my ($self) = @_;
     
@@ -628,9 +658,12 @@ sub _bind_all_canvas {
         # Redimensionamiento de la ventana: reprogramar render
         $p_canvas->Tk::bind('<Configure>', sub { $self->_on_resize($p_canvas); });
         
-        # Teclas para control de escala Y
-        $p_canvas->Tk::bind('<Key-a>', sub { $self->set_scale_mode('auto'); });   # 'a' → auto escala
-        $p_canvas->Tk::bind('<Key-m>', sub { $self->set_scale_mode('manual'); });  # 'm' → manual
+        # Teclas para control de modo (Automático/Manual) y escala Y
+        $p_canvas->Tk::bind('<Key-A>', sub { $self->set_chart_mode('automatic'); });  # 'A' → modo automático
+        $p_canvas->Tk::bind('<Key-M>', sub { $self->set_chart_mode('manual'); });     # 'M' → modo manual
+        $p_canvas->Tk::bind('<Key-a>', sub { $self->set_scale_mode('auto'); });   # 'a' → auto escala (legacy)
+        $p_canvas->Tk::bind('<Key-m>', sub { $self->set_scale_mode('manual'); });  # 'm' → manual escala (legacy)
+        $p_canvas->Tk::bind('<Key-t>', sub { $self->toggle_theme(); });
         $p_canvas->Tk::bind('<Key-plus>', sub { $self->{is_auto_scale} = 0; $self->_vertical_zoom(0.9); });   # '+' → zoom in
         $p_canvas->Tk::bind('<Key-minus>', sub { $self->{is_auto_scale} = 0; $self->_vertical_zoom(1.1); });  # '-' → zoom out
         $p_canvas->Tk::bind('<Up>', sub { $self->{is_auto_scale} = 0; $self->_vertical_drag(-10); });    # Flecha arriba → pan up
@@ -648,37 +681,44 @@ sub _bind_all_canvas {
         });
     }
     
-    # 2. Binding idéntico para el panel del ATR (misma lógica)
+    # 2. Binding idéntico para el panel del ATR
     if (defined $a_canvas) {
         $a_canvas->Tk::bind('<Motion>', [sub {
             my ($widget, $x, $y) = @_;
             $self->_on_mouse_move($widget, $x, $y);
         }, Tk::Ev('x'), Tk::Ev('y')]);
+        
         $a_canvas->Tk::bind('<ButtonPress-1>', [sub {
             my ($widget, $x, $y) = @_;
             $self->_start_horizontal_drag($widget, $x, $y);
         }, Tk::Ev('x'), Tk::Ev('y')]);
+        
         $a_canvas->Tk::bind('<B1-Motion>', [sub {
             my ($widget, $x, $y) = @_;
             $self->_on_horizontal_drag($widget, $x, $y);
         }, Tk::Ev('x'), Tk::Ev('y')]);
+        
         $a_canvas->Tk::bind('<ButtonRelease-1>', sub { $self->_end_drag(); });
+        
         $a_canvas->Tk::bind('<MouseWheel>', [sub {
             my ($widget, $delta, $x, $y, $state) = @_;
             my $step = $delta > 0 ? -ZOOM_STEP : ZOOM_STEP;
             $self->_wheel_zoom($widget, $step, $x, $y, $state);
             return 'break';
         }, Tk::Ev('D'), Tk::Ev('x'), Tk::Ev('y'), Tk::Ev('s')]);
+        
         $a_canvas->Tk::bind('<Button-4>', [sub {
             my ($widget, $x, $y, $state) = @_;
             $self->_wheel_zoom($widget, -ZOOM_STEP, $x, $y, $state);
             return 'break';
         }, Tk::Ev('x'), Tk::Ev('y'), Tk::Ev('s')]);
+        
         $a_canvas->Tk::bind('<Button-5>', [sub {
             my ($widget, $x, $y, $state) = @_;
             $self->_wheel_zoom($widget, ZOOM_STEP, $x, $y, $state);
             return 'break';
         }, Tk::Ev('x'), Tk::Ev('y'), Tk::Ev('s')]);
+        
         $a_canvas->Tk::bind('<Configure>', sub { $self->_on_resize($a_canvas); });
         $a_canvas->Tk::bind('<Leave>', sub {
             $self->{last_mouse_x} = undef;
@@ -701,6 +741,28 @@ sub _bind_all_canvas {
         $axis_canvas->Tk::bind('<ButtonRelease-1>', sub { $self->_end_price_axis_drag(); });
         $axis_canvas->Tk::bind('<Double-Button-1>', sub { $self->set_scale_mode('auto'); });
         $axis_canvas->Tk::bind('<Enter>', sub { eval { $axis_canvas->configure(-cursor => 'sb_v_double_arrow') } });
+    }
+ # 3b. NUEVO: Binding para el eje lateral del ATR (zoom Y manual del indicador)
+    my $atr_axis = $self->{atr_axis_canvas};
+    if (defined $atr_axis) {
+        $atr_axis->Tk::bind('<ButtonPress-1>', [sub {
+            my ($widget, $y) = @_;
+            $self->_start_atr_axis_drag($widget, $y);
+        }, Tk::Ev('y')]);
+        $atr_axis->Tk::bind('<B1-Motion>', [sub {
+            my ($widget, $y) = @_;
+            $self->_on_atr_axis_drag($widget, $y);
+        }, Tk::Ev('y')]);
+        $atr_axis->Tk::bind('<ButtonRelease-1>', sub { $self->_end_atr_axis_drag(); });
+        $atr_axis->Tk::bind('<Double-Button-1>', sub {
+            $self->{atr_is_auto_scale} = 1;
+            $self->{atr_manual_min_y}  = undef;
+            $self->{atr_manual_max_y}  = undef;
+            $self->request_render();
+        });
+        $atr_axis->Tk::bind('<Enter>', sub {
+            eval { $atr_axis->configure(-cursor => 'sb_v_double_arrow') }
+        });
     }
 
     # 4. Binding para el eje temporal inferior (zoom horizontal con arrastre)
@@ -744,17 +806,13 @@ sub _bind_all_canvas {
     }
 }
 
-# ============================================================================
-# bind_events: Punto de entrada para conectar eventos (llama a _bind_all_canvas)
-# ============================================================================
+# bind_events: Punto de entrada para conectar eventos 
 sub bind_events {
     my ($self) = @_;
     $self->_bind_all_canvas();
 }
 
-# ============================================================================
 # _anchor_index_and_x: Calcula el punto de anclaje para zoom con anclaje
-# ============================================================================
 sub _anchor_index_and_x {
     my ($self, $anchor_x) = @_;
 
@@ -762,32 +820,21 @@ sub _anchor_index_and_x {
     my $bars = $end - $start + 1;
     $bars = 1 if $bars < 1;
 
-    # Escala temporal para convertir X <-> índice
     my $scale = Market::Panels::Scales->new(
         bars         => $bars,
         right_margin => RIGHT_MARGIN,
     );
     $scale->{width} = $self->_canvas_width($self->{price_canvas});
 
-    if (defined $anchor_x) {
-        # Caso 1: cursor sobre una barra
-        my $local  = $scale->x_to_index($anchor_x);   # Índice local (0..bars-1)
-        my $global = $start + $local;                 # Índice global
-        return ($global, $anchor_x);                  # La X se conserva
-    }
+    my $local  = $scale->x_to_index_float($anchor_x) - 0.5;
+    my $global = $start + $local;
+    $global = 0 if $global < 0;
+    $global = $self->{market_data}->last_index() if $global > $self->{market_data}->last_index();
 
-    # Caso 2: sin cursor, anclar en la última vela visible
-    my $last_real = ($self->{market_data}->size() || 1) - 1;
-    my $anchor_index = $end > $last_real ? $last_real : $end;   # No anclar en velas futuras
-    $anchor_index = 0 if $anchor_index < 0;
-    my $local_of_anchor = $anchor_index - $start;
-    my $screen_x = $scale->index_to_center_x($local_of_anchor);
-    return ($anchor_index, $screen_x);
+    return ($global, $anchor_x);
 }
 
-# ============================================================================
 # _zoom_anchor_x: Decide si usar anclaje de cursor o no
-# ============================================================================
 sub _zoom_anchor_x {
     my ($self) = @_;
 
@@ -810,80 +857,106 @@ sub _zoom_anchor_x {
     $scale->{width} = $w;
     my $plot_w = $scale->plot_width();   # Ancho del área de ploteo
 
-    # Si el cursor está dentro del área de ploteo, devolver su X; si no, undef
     return ($x >= 0 && $x <= $plot_w) ? $x : undef;
 }
 
-# ============================================================================
+# Limpiar estado de Ctrl+Zoom 
+sub _clear_ctrl_zoom_state {
+    my ($self) = @_;
+    $self->{ctrl_zoom_x_shift} = 0;
+    $self->{ctrl_zoom_y_lock_min} = undef;
+    $self->{ctrl_zoom_y_lock_max} = undef;
+}
+
 # _wheel_zoom: Maneja el evento de la rueda del ratón
-# ============================================================================
+# _wheel_zoom: Maneja el evento de la rueda del ratón (VERSIÓN CORREGIDA)
 sub _wheel_zoom {
     my ($self, $widget, $step, $x, $y, $state) = @_;
 
-    # Guardar posición del cursor para el crosshair
-    if (defined $x) {
-        $self->{last_mouse_x} = $self->round($x);
-        $self->{last_mouse_y} = $self->round($y) if defined $y;
-        $self->{active_canvas} = $widget if defined $widget;
-    }
-
-    # Verificar si Ctrl está presionado (máscara 0x0004)
+    # GUARDAR posición actual del cursor ANTES de hacer zoom
+    my $saved_x = defined $x ? $self->round($x) : $self->{last_mouse_x};
+    my $saved_y = defined $y ? $self->round($y) : $self->{last_mouse_y};
+    my $saved_widget = $widget || $self->{active_canvas};
+    
+    # Verificar si Ctrl está presionado
     my $ctrl_pressed = defined $state && ($state & CTRL_MASK);
-    # Si Ctrl está presionado, obtener X de anclaje; si no, undef
-    my $anchor_x = $ctrl_pressed ? $self->_zoom_anchor_x() : undef;
-    $self->_horizontal_zoom($step, $anchor_x);
+    
+    # Aplicar el zoom
+    if ($ctrl_pressed) {
+        my $anchor_x = $self->_zoom_anchor_x();
+        if (defined $anchor_x) {
+            $self->_ctrl_horizontal_zoom($step, $anchor_x);
+        } else {
+            $self->_horizontal_zoom($step, undef);
+        }
+    } else {
+        $self->_clear_ctrl_zoom_state();
+        $self->_horizontal_zoom($step, undef);
+    }
+    
+    # RESTAURAR la posición del cursor después del zoom
+    if (defined $saved_x) {
+        $self->{last_mouse_x} = $saved_x;
+        $self->{last_mouse_y} = $saved_y if defined $saved_y;
+        $self->{active_canvas} = $saved_widget if defined $saved_widget;
+        
+        # Forzar ACTUALIZACIÓN INMEDIATA del crosshair
+        $self->_draw_crosshair_all();
+    }
 }
 
-# ============================================================================
-# _horizontal_zoom: Zoom horizontal con anclaje (Req. 8.1, 8.2, 9.1-9.4)
-# ============================================================================
-sub _horizontal_zoom {
+# _horizontal_zoom: Zoom horizontal con anclaje 
+sub _ctrl_horizontal_zoom {
     my ($self, $delta, $anchor_x) = @_;
-
+    
     my $total = $self->{market_data}->size();
-    return unless $total && $total > 0;
-    my $old_offset = $self->{offset};
-    my $use_cursor_anchor = defined $anchor_x;
-
-    # 1. Punto de anclaje (índice GLOBAL + X de pantalla) ANTES del zoom
-    my ($anchor_index, $anchor_screen_x) = $use_cursor_anchor 
-        ? $self->_anchor_index_and_x($anchor_x) 
-        : $self->_anchor_index_and_x(undef);
-
-    # 2. Nuevo número de velas visibles, acotado
-    my $new_visible = $self->{visible_bars} + $delta;
+    return if !$total;
+    
+    my ($start, $end) = $self->compute_window();
+    my $old_visible = $self->{visible_bars} || ($end - $start + 1) || 1;
     my $max_visible = $total < MAX_VISIBLE_BARS ? $total : MAX_VISIBLE_BARS;
+    $max_visible = MIN_VISIBLE_BARS if $max_visible < MIN_VISIBLE_BARS;
+    
+    my $new_visible = $old_visible + $delta;
     $new_visible = MIN_VISIBLE_BARS if $new_visible < MIN_VISIBLE_BARS;
-    $new_visible = $max_visible     if $new_visible > $max_visible;
-
-    # 3. Aplicar el nuevo zoom
+    $new_visible = $max_visible if $new_visible > $max_visible;
+    return if $new_visible == $old_visible;
+    
+    my $canvas_w = $self->_canvas_width($self->{price_canvas});
+    return if !$canvas_w || $canvas_w <= 0;
+    
+    my $old_scale = Market::Panels::Scales->new(bars => $old_visible, right_margin => RIGHT_MARGIN);
+    $old_scale->{width} = $canvas_w;
+    $old_scale->{x_shift} = $self->{ctrl_zoom_x_shift} || 0;
+    
+    my $anchor_global = $start + $old_scale->x_to_index_float($anchor_x) - 0.5;
+    
+    my $new_scale = Market::Panels::Scales->new(bars => $new_visible, right_margin => RIGHT_MARGIN);
+    $new_scale->{width} = $canvas_w;
+    my $new_bar_w = $new_scale->plot_width() / $new_visible;
+    return if $new_bar_w <= 0;
+    
+    my $target_start = $anchor_global - (($anchor_x - ($new_bar_w / 2)) / $new_bar_w);
+    my $new_start = $self->round($target_start);
+    my $new_end = $new_start + $new_visible - 1;
+    my $new_offset = ($total - 1) - $new_end;
+    
     $self->{visible_bars} = $new_visible;
-
-    # Si no usamos anclaje de cursor y ya estábamos pegados a la derecha, solo mantener offset
-    if (!$use_cursor_anchor) {
-        if ($old_offset <= 0) {
-            $self->{offset} = $self->_clamp_offset($old_offset);
-            $self->request_render();
-            return;
+    $self->{offset} = $self->_clamp_offset($new_offset);
+    
+    ($new_start, $new_end) = $self->compute_window();
+    $self->{ctrl_zoom_x_shift} = $anchor_x - (($anchor_global - $new_start + 0.5) * $new_bar_w);
+    
+    if ($self->{is_auto_scale}) {
+        $self->{ctrl_zoom_y_lock_min} = undef;
+        $self->{ctrl_zoom_y_lock_max} = undef;
+    } elsif (!defined $self->{ctrl_zoom_y_lock_min} || !defined $self->{ctrl_zoom_y_lock_max}) {
+        if (defined $self->{manual_min_y} && defined $self->{manual_max_y}) {
+            $self->{ctrl_zoom_y_lock_min} = $self->{manual_min_y};
+            $self->{ctrl_zoom_y_lock_max} = $self->{manual_max_y};
         }
     }
-
-    # 4. Nueva escala con el nuevo número de barras
-    my $scale = Market::Panels::Scales->new(
-        bars         => $new_visible,
-        right_margin => RIGHT_MARGIN,
-    );
-    $scale->{width} = $self->_canvas_width($self->{price_canvas});
-
-    # 5. Calcular nuevo offset para que el ancla quede en su X anterior
-    #    Fórmula: local = X/bar_w - 0.5 (porque index_to_center_x = (local + 0.5) * bar_w)
-    my $local_target = $scale->x_to_index_float($anchor_screen_x) - 0.5;
-    my $end_idx      = $anchor_index + ($new_visible - 1 - $local_target);
-    my $offset       = ($total - 1) - $end_idx;
-
-    # 6. Acotar offset y renderizar
-    $offset = $self->round($offset);
-    $self->{offset} = $self->_clamp_offset($offset);
+    
     $self->request_render();
 }
 
@@ -914,6 +987,9 @@ sub _start_horizontal_drag {
 
 # ============================================================================
 # _on_horizontal_drag: Maneja el movimiento durante un arrastre horizontal
+# Comportamiento diferente según chart_mode:
+#   - 'automatic': solo scroll X, escala Y automática
+#   - 'manual': scroll X + pan Y simultáneo
 # ============================================================================
 sub _on_horizontal_drag {
     my ($self, $widget, $x, $y) = @_;
@@ -943,28 +1019,105 @@ sub _on_horizontal_drag {
     my $delta_bars = int(($current_x - $self->{drag_start_x}) / $bar_w);
     $self->{offset} = $self->_clamp_offset($self->{drag_start_offset} + $delta_bars);
     
-    # También aplicar arrastre vertical si corresponde (pan Y en modo manual)
-    $self->_apply_vertical_drag_from_start($current_y);
+    # En modo automático: forzar escala Y automática, NO permitir pan vertical
+    # En modo manual: permitir arrastre vertical simultáneo (pan Y)
+    if ($self->{chart_mode} eq 'automatic') {
+        # Modo automático: solo scroll horizontal, mantener escala automática
+        $self->{is_auto_scale} = 1;
+        $self->{manual_min_y} = undef;
+        $self->{manual_max_y} = undef;
+    } else {
+        # Modo manual: permitir arrastre vertical si corresponde
+        $self->_apply_vertical_drag_from_start($current_y);
+    }
     
     $self->request_render();   # Reprogramar render
 }
 
-# ============================================================================
+# _horizontal_zoom: Zoom horizontal estándar (VERSIÓN CORREGIDA)
+sub _horizontal_zoom {
+    my ($self, $delta, $anchor_x) = @_;
+
+    my $total = $self->{market_data}->size();
+    return unless $total && $total > 0;
+
+    my $old_visible = $self->{visible_bars};
+    my $new_visible = $old_visible + $delta;
+
+    my $max_visible = $total < MAX_VISIBLE_BARS ? $total : MAX_VISIBLE_BARS;
+    $new_visible = MIN_VISIBLE_BARS if $new_visible < MIN_VISIBLE_BARS;
+    $new_visible = $max_visible     if $new_visible > $max_visible;
+
+    return if $new_visible == $old_visible;
+
+    my ($anchor_global, $anchor_screen_x);
+
+    if (defined $anchor_x) {
+        # Zoom con anclaje en la posición del cursor
+        ($anchor_global, $anchor_screen_x) = $self->_anchor_index_and_x($anchor_x);
+    } else {
+        # Zoom sin anclaje específico: usar el centro visible O la posición del mouse si existe
+        my ($start, $end) = $self->compute_window();
+        
+        # Si tenemos posición del mouse guardada, usarla como anclaje
+        if (defined $self->{last_mouse_x}) {
+            my $mouse_x = $self->{last_mouse_x};
+            my $canvas_w = $self->_canvas_width($self->{price_canvas});
+            if ($canvas_w && $canvas_w > 0 && $mouse_x >= 0 && $mouse_x <= $canvas_w) {
+                ($anchor_global, $anchor_screen_x) = $self->_anchor_index_and_x($mouse_x);
+            }
+        }
+        
+        # Si no se pudo usar el mouse, usar la última vela real
+        if (!defined $anchor_global) {
+            my $last_real_idx = $self->{market_data}->last_index();
+            my $anchor_idx = $end > $last_real_idx ? $last_real_idx : $end;
+            $anchor_idx = 0 if $anchor_idx < 0;
+
+            my $old_scale = Market::Panels::Scales->new(
+                bars         => $old_visible,
+                right_margin => RIGHT_MARGIN,
+            );
+            $old_scale->{width} = $self->_canvas_width($self->{price_canvas});
+
+            my $local_anchor = $anchor_idx - $start;
+            $anchor_screen_x = $old_scale->index_to_center_x($local_anchor);
+            $anchor_global = $anchor_idx;
+        }
+    }
+
+    # Aplicar el cambio de zoom manteniendo fijo el ancla
+    $self->{visible_bars} = $new_visible;
+
+    my $new_scale = Market::Panels::Scales->new(
+        bars         => $new_visible,
+        right_margin => RIGHT_MARGIN,
+    );
+    $new_scale->{width} = $self->_canvas_width($self->{price_canvas});
+
+    my $local_target = $new_scale->x_to_index_float($anchor_screen_x) - 0.5;
+    my $end_idx      = $anchor_global + ($new_visible - 1 - $local_target);
+    my $new_offset   = ($total - 1) - $end_idx;
+
+    $self->{offset} = $self->_clamp_offset($self->round($new_offset));
+
+    $self->_clear_ctrl_zoom_state() unless defined $anchor_x;
+
+    $self->request_render();
+}
+
 # _on_time_axis_motion: Maneja movimiento del ratón sobre el eje temporal
-# ============================================================================
 sub _on_time_axis_motion {
     my ($self, $widget, $x, $y) = @_;
 
     return unless defined $x;
     $self->{last_mouse_x} = $self->round($x);
-    $self->{last_mouse_y} = undef;   # Sin información Y en el eje temporal
+    $self->{last_mouse_y} = undef;
     $self->{active_canvas} = $widget if defined $widget;
     $self->_draw_crosshair_all();
 }
 
-# ============================================================================
 # _start_time_axis_drag: Inicia arrastre en el eje temporal (zoom horizontal)
-# ============================================================================
 sub _start_time_axis_drag {
     my ($self, $widget, $x, $y) = @_;
 
@@ -973,9 +1126,7 @@ sub _start_time_axis_drag {
     $self->{time_axis_drag_visible} = $self->{visible_bars};
 }
 
-# ============================================================================
-# _on_time_axis_drag: Maneja arrastre en el eje temporal (cambia visible_bars)
-# ============================================================================
+# _on_time_axis_drag: Maneja arrastre en el eje temporal 
 sub _on_time_axis_drag {
     my ($self, $widget, $x, $y) = @_;
 
@@ -994,23 +1145,20 @@ sub _on_time_axis_drag {
     my $new_visible = ($self->{time_axis_drag_visible} || $self->{visible_bars}) + $delta;
     $new_visible = MIN_VISIBLE_BARS if $new_visible < MIN_VISIBLE_BARS;
     $new_visible = $max_visible     if $new_visible > $max_visible;
-    return if $new_visible == $self->{visible_bars};   # Sin cambio, no hacer nada
+    return if $new_visible == $self->{visible_bars};   
 
     $self->_horizontal_zoom($new_visible - $self->{visible_bars}, undef);
 }
 
-# ============================================================================
+
 # _end_time_axis_drag: Limpia estado del arrastre en el eje temporal
-# ============================================================================
 sub _end_time_axis_drag {
     my ($self) = @_;
     $self->{time_axis_drag_start_x} = undef;
     $self->{time_axis_drag_visible} = undef;
 }
 
-# ============================================================================
 # _apply_vertical_drag_from_start: Aplica arrastre vertical (pan Y) durante un drag
-# ============================================================================
 sub _apply_vertical_drag_from_start {
     my ($self, $current_y) = @_;
 
@@ -1034,9 +1182,7 @@ sub _apply_vertical_drag_from_start {
     $self->{is_auto_scale} = 0;   # Cambiar a modo manual automáticamente
 }
 
-# ============================================================================
 # _start_price_axis_drag: Inicia arrastre en el eje lateral de precios (zoom Y)
-# ============================================================================
 sub _start_price_axis_drag {
     my ($self, $widget, $y) = @_;
 
@@ -1052,9 +1198,7 @@ sub _start_price_axis_drag {
     $self->{axis_drag_max_y} = $max;
 }
 
-# ============================================================================
 # _on_price_axis_drag: Maneja arrastre en el eje lateral (zoom Y exponencial)
-# ============================================================================
 sub _on_price_axis_drag {
     my ($self, $widget, $y) = @_;
 
@@ -1070,8 +1214,6 @@ sub _on_price_axis_drag {
     my $max = $self->{axis_drag_max_y};
     my $center = ($min + $max) / 2;
     my $half = ($max - $min) / 2;
-
-    # Factor exponencial: dy positivo (abajo) → factor > 1 → zoom out (aumenta half)
     my $factor = exp($dy / 220);
     $factor = 0.000001 if $factor < 0.000001;   # Evitar valores absurdos
     $half *= $factor;
@@ -1082,9 +1224,7 @@ sub _on_price_axis_drag {
     $self->request_render();
 }
 
-# ============================================================================
 # _end_price_axis_drag: Limpia estado del arrastre en el eje lateral
-# ============================================================================
 sub _end_price_axis_drag {
     my ($self) = @_;
     $self->{axis_drag_start_y} = undef;
@@ -1092,9 +1232,67 @@ sub _end_price_axis_drag {
     $self->{axis_drag_max_y} = undef;
 }
 
-# ============================================================================
+# _start_atr_axis_drag: Inicia arrastre en el eje lateral del ATR
+sub _start_atr_axis_drag {
+    my ($self, $widget, $y) = @_;
+    
+    my $root_y = eval { $widget->pointery() };
+    $self->{atr_axis_drag_start_y} = defined $root_y ? $root_y : $y;
+    
+    my $scale = $self->{atr_panel} ? $self->{atr_panel}->{scale} : undef;
+    
+    my $min = defined $self->{atr_manual_min_y} 
+        ? $self->{atr_manual_min_y} 
+        : (defined $scale ? $scale->{min_y} : undef);
+        
+    my $max = defined $self->{atr_manual_max_y} 
+        ? $self->{atr_manual_max_y} 
+        : (defined $scale ? $scale->{max_y} : undef);
+    
+    return unless defined $min && defined $max && $max > $min;
+    
+    $self->{atr_axis_drag_min_y} = $min;
+    $self->{atr_axis_drag_max_y} = $max;
+}
+
+# _on_atr_axis_drag: Maneja arrastre en el eje lateral del ATR (zoom exponencial)
+sub _on_atr_axis_drag {
+    my ($self, $widget, $y) = @_;
+    
+    return unless defined $self->{atr_axis_drag_start_y};
+    return unless defined $self->{atr_axis_drag_min_y} && defined $self->{atr_axis_drag_max_y};
+    
+    my $root_y = eval { $widget->pointery() };
+    my $current_y = defined $root_y ? $root_y : $y;
+    return unless defined $current_y;
+    
+    my $dy = $current_y - $self->{atr_axis_drag_start_y};
+    my $min = $self->{atr_axis_drag_min_y};
+    my $max = $self->{atr_axis_drag_max_y};
+    my $center = ($min + $max) / 2;
+    my $half = ($max - $min) / 2;
+    
+    my $factor = exp($dy / 220);
+    $factor = 0.000001 if $factor < 0.000001;
+    $half *= $factor;
+    
+    $self->{atr_manual_min_y} = $center - $half;
+    $self->{atr_manual_max_y} = $center + $half;
+    $self->{atr_is_auto_scale} = 0;
+    
+    $self->request_render();
+}
+
+# _end_atr_axis_drag: Limpia estado del arrastre en el eje lateral del ATR
+sub _end_atr_axis_drag {
+    my ($self) = @_;
+    
+    $self->{atr_axis_drag_start_y} = undef;
+    $self->{atr_axis_drag_min_y}   = undef;
+    $self->{atr_axis_drag_max_y}   = undef;
+}
+
 # set_scale_mode: Cambia entre escala automática y manual
-# ============================================================================
 sub set_scale_mode {
     my ($self, $mode) = @_;
 
@@ -1111,9 +1309,26 @@ sub set_scale_mode {
     $self->request_render();
 }
 
-# ============================================================================
+# set_chart_mode: Cambia entre modo automático y manual
+sub set_chart_mode {
+    my ($self, $mode) = @_;
+
+    return unless defined $mode && ($mode eq 'automatic' || $mode eq 'manual');
+
+    $self->{chart_mode} = $mode;
+
+    if ($mode eq 'automatic') {
+        # Modo automático: forzar escala Y automática
+        $self->{is_auto_scale} = 1;
+        $self->{manual_min_y} = undef;
+        $self->{manual_max_y} = undef;
+    } else {
+    }
+
+    $self->request_render();
+}
+
 # _on_resize: Maneja redimensionamiento de la ventana
-# ============================================================================
 sub _on_resize {
     my ($self, $widget) = @_;
 
@@ -1131,9 +1346,7 @@ sub _on_resize {
     $self->request_render();
 }
 
-# ============================================================================
 # _end_drag: Limpia el estado después de un arrastre
-# ============================================================================
 sub _end_drag {
     my ($self) = @_;
 
@@ -1147,9 +1360,7 @@ sub _end_drag {
     $self->{drag_cursor_canvas} = undef;
 }
 
-# ============================================================================
 # _vertical_drag: Desplazamiento vertical (pan Y) con teclas Up/Down
-# ============================================================================
 sub _vertical_drag {
     my ($self, $dy) = @_;
 
@@ -1172,9 +1383,7 @@ sub _vertical_drag {
     $self->request_render();
 }
 
-# ============================================================================
 # _vertical_zoom: Zoom Y con teclas '+' y '-'
-# ============================================================================
 sub _vertical_zoom {
     my ($self, $factor) = @_;
 
@@ -1196,9 +1405,7 @@ sub _vertical_zoom {
     $self->request_render();
 }
 
-# ============================================================================
 # _on_mouse_move: Maneja movimiento del ratón sobre cualquier canvas
-# ============================================================================
 sub _on_mouse_move {
     my ($self, $widget, $raw_x, $raw_y) = @_;
     
@@ -1214,10 +1421,7 @@ sub _on_mouse_move {
     $self->_draw_crosshair_all();
 }
 
-# ============================================================================
 # _crosshair_time_label: Genera etiqueta de tiempo para el crosshair (HH:MM o fecha completa)
-# ⭐ MODIFICADO: Ahora muestra fecha completa "lun 29 Sep '26 20:36"
-# ============================================================================
 sub _crosshair_time_label {
     my ($self) = @_;
 
@@ -1250,24 +1454,11 @@ sub _crosshair_time_label {
     my $tm = eval { Time::Moment->from_string($ts) };
     return undef unless $tm;
 
-    # Detectar si es un cambio de día (medianoche)
-    my $is_day_change = 0;
-    my $anchors = $self->{market_data}->compute_time_anchors();
-    for my $a (@$anchors) {
-        if ($a->{is_date} && $a->{index} == $global) {
-            $is_day_change = 1;
-            last;
-        }
-    }
-
-    # Devolver formato completo (fecha + hora) o solo fecha si es cambio de día
-    return $self->_format_full_datetime($tm, $is_day_change);
+    # Devolver formato completo (fecha + hora)
+    return $self->_format_full_datetime($tm, 0);
 }
 
-# ============================================================================
 # _format_full_datetime: Formatea fecha completa para el crosshair
-# ⭐ NUEVA FUNCIÓN: Ejemplo "lun 29 Sep '26 20:36" o "lun 29 Sep '26"
-# ============================================================================
 sub _format_full_datetime {
     my ($self, $tm, $is_day_change) = @_;
 
@@ -1287,18 +1478,13 @@ sub _format_full_datetime {
     # Parte de la fecha: "lun 29 Sep '26"
     my $date_part = sprintf("%s %d %s '%02d", $day_name, $day_num, $month, $year_short);
 
-    # Si es cambio de día, devolver solo la fecha
-    return $date_part if $is_day_change;
-
     # Si no, agregar la hora: "lun 29 Sep '26 20:36"
     my $hour   = sprintf("%02d", $tm->hour);
     my $minute = sprintf("%02d", $tm->minute);
     return "$date_part $hour:$minute";
 }
 
-# ============================================================================
 # _draw_crosshair_all: Dibuja el crosshair en todos los paneles y ejes
-# ============================================================================
 sub _draw_crosshair_all {
     my ($self) = @_;
 
@@ -1340,14 +1526,12 @@ sub _draw_crosshair_all {
     $self->_draw_atr_axis_crosshair($atr_y);
 }
 
-# ============================================================================
 # set_timeframe: Cambia la temporalidad (1m, 5m, 15m)
-# ============================================================================
 sub set_timeframe {
     my ($self, $tf) = @_;
 
     if ($tf ne '1m' && $tf ne '5m' && $tf ne '15m') {
-        warn "Temporalidad '$tf' no soportada por el sistema.";
+        warn "Temporalidad '$tf' no soportada del sistema.";
         return;
     }
 
@@ -1368,9 +1552,7 @@ sub set_timeframe {
     $self->reset_view();
 }
 
-# ============================================================================
 # reset_view: Restablece la vista a los valores por defecto
-# ============================================================================
 sub reset_view {
     my ($self) = @_;
 
@@ -1379,12 +1561,12 @@ sub reset_view {
     $self->{is_auto_scale} = 1;   # Escala automática
     $self->{manual_min_y} = undef;
     $self->{manual_max_y} = undef;
+    $self->_clear_ctrl_zoom_state();
     $self->request_render();
 }
 
-# ============================================================================
+
 # compute_intraday_labels: Genera etiquetas del eje temporal inferior
-# ============================================================================
 sub compute_intraday_labels {
     my ($self) = @_;
 
@@ -1468,30 +1650,26 @@ sub compute_intraday_labels {
     return \@labels;
 }
 
-# ============================================================================
 # _time_label_for_index: Formatea un Time::Moment como 'HH:MM' o 'DD Mon'
-# ============================================================================
 sub _time_label_for_index {
     my ($self, $tm, $is_date) = @_;
 
     return undef unless defined $tm && ref($tm) eq 'Time::Moment';
 
     if ($is_date) {
-        # ⭐ MEJORADO: Ahora muestra "lun 29 Sep" en lugar de "29 Sep"
-        my @days = qw(dom lun mar mié jue vie sáb);
+        my @days   = qw(dom lun mar mié jue vie sáb);
         my @months = qw(ene feb mar abr may jun jul ago sep oct nov dic);
         my $day_name = $days[$tm->day_of_week];
         my $day_num  = $tm->day_of_month;
         my $month    = $months[$tm->month - 1];
+        return undef unless defined $day_name && defined $day_num && defined $month;
         return sprintf("%s %d %s", $day_name, $day_num, $month);
     }
 
     return sprintf("%02d:%02d", $tm->hour, $tm->minute);
 }
 
-# ============================================================================
-# get_all_timestamps: Obtiene timestamps de todas las velas visibles (con extrapolación)
-# ============================================================================
+# get_all_timestamps: Obtiene timestamps de todas las velas visibles 
 sub get_all_timestamps {
     my ($self) = @_;
 
@@ -1520,15 +1698,58 @@ sub get_all_timestamps {
 }
 
 # ============================================================================
-# _timeframe_minutes: Devuelve la duración en minutos del timeframe actual
+# MÉTODOS PÚBLICOS DE NAVEGACIÓN
 # ============================================================================
+
+# go_to_start: Navega al inicio del gráfico (primeras velas)
+sub go_to_start {
+    my ($self) = @_;
+    
+    my $total = $self->{market_data}->size();
+    return unless $total > 0;
+    
+    $self->{offset} = 0;
+    $self->request_render();
+    
+    # Opcional: registrar en log
+    # warn "[ChartEngine] Navegando al inicio\n";
+}
+
+# go_to_end: Navega al final del gráfico (últimas velas)
+sub go_to_end {
+    my ($self) = @_;
+    
+    my $total = $self->{market_data}->size();
+    return unless $total > 0;
+    
+    my $max_offset = $self->_max_offset_for_visible();
+    $self->{offset} = $max_offset;
+    $self->request_render();
+    
+    # Opcional: registrar en log
+    # warn "[ChartEngine] Navegando al final (offset=$max_offset)\n";
+}
+
+# get_current_offset: Devuelve el offset actual (para depuración)
+sub get_current_offset {
+    my ($self) = @_;
+    return $self->{offset};
+}
+
+# get_max_offset: Devuelve el offset máximo permitido (público)
+sub get_max_offset {
+    my ($self) = @_;
+    return $self->_max_offset_for_visible();
+}
+
+# _timeframe_minutes: Devuelve la duración en minutos del timeframe actual
 sub _timeframe_minutes {
     my ($self) = @_;
 
     my $tf = eval { $self->{market_data}->{active_tf} } || '1m';
     return 5  if $tf eq '5m';
     return 15 if $tf eq '15m';
-    return 1;   # '1m' o cualquier otro valor por defecto
+    return 1;   
 }
 
 1;

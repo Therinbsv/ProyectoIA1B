@@ -23,7 +23,7 @@ sub new {
 
 # update_last(): Procesa UNA nueva vela y actualiza el ATR incrementalmente (O(1)).
 sub update_last {
-    my ($self, $market_data, $index) = @_;.
+    my ($self, $market_data, $index) = @_;
 
     # Obtener la vela: si nos dieron índice, pedimos esa; si no, la última.
     my $candle = defined $index ? $market_data->get_candle($index) : $market_data->last_candle();

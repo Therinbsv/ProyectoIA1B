@@ -8,7 +8,7 @@ sub new {
     my $self = {
         %args,
     };
-    # El tema (paleta clara) se inyecta vía `theme => \%theme` desde ChartEngine.
+    # El tema se inyecta vía `theme => \%theme` desde ChartEngine.
     $self->{theme} = {} unless defined $self->{theme};
     bless $self, $class;
     return $self;
@@ -23,14 +23,14 @@ sub _init_crosshair_objects {
     $self->{_ch_label_bg} = undef;
 }
 
-# round(): Redondea al entero más cercano (auxiliar, aunque no se usa mucho).
+# round(): Redondea al entero más cercano.
 sub round {
     my ($self, $value) = @_;
     return 0 unless defined $value;
     return int($value + ($value >= 0 ? 0.5 : -0.5));
 }
 
-# _canvas_size(): Obtiene ancho y alto del canvas (igual que en ATRPanel).
+# _canvas_size(): Obtiene ancho y alto del canvas 
 sub _canvas_size {
     my ($self, $canvas) = @_;
     my ($w, $h) = (0, 0);
@@ -46,8 +46,6 @@ sub _canvas_size {
 }
 
 # get_y_range(): Calcula el rango de precios (min, max) de las velas visibles.
-# Recibe un arrayref de velas (cada una es [ts, open, high, low, close, vol]).
-# Devuelve (min_price, max_price) con padding del 2%.
 sub get_y_range {
     my ($self, $data) = @_;
     return (20000, 30000) if !$data || !@$data;   # Rango por defecto para BTC aprox.
@@ -64,8 +62,8 @@ sub get_y_range {
         $max = $candle->[2] if $candle->[2] > $max;   # high más alto
     }
 
-    # Padding del 2% para que las velas no toquen los bordes.
-    my $padding = ($max - $min) * 0.02 || 1;
+    # Padding del 5% para que las velas no toquen los bordes.
+    my $padding = ($max - $min) * 0.05 || 1;
     return ($min - $padding, $max + $padding);
 }
 
@@ -97,11 +95,11 @@ sub render {
         }
     }
 
-    # Calcular ancho de cada barra y del cuerpo (60% del ancho de la barra).
+    # Calcular ancho de cada barra y del cuerpo (80% del ancho de la barra).
     my $total  = scalar(@$data);
     my $x_bars = $scale->{bars} || $total || 1;
     my $bar_w  = ($x_bars > 0) ? ($scale->plot_width() / $x_bars) : 1;
-    my $body_w = $bar_w * 0.6;
+    my $body_w = $bar_w * 0.8; # Cuerpo de la vela es el 80% del ancho de la barra
     $body_w = 1 if $body_w < 1;
     $body_w = $bar_w if $body_w > $bar_w;
     my $half   = $body_w / 2;   # Mitad del ancho del cuerpo para centrarlo en la coordenada X
@@ -122,8 +120,8 @@ sub render {
 
         # Color: verde (#26a69a) para vela alcista (close >= open), rojo (#ef5350) para bajista
         my $color = ($close >= $open)
-            ? ($self->{theme}{bull} // '#26a69a')
-            : ($self->{theme}{bear} // '#ef5350');
+            ? ($self->{theme}{bull} // '#16b0a1')
+            : ($self->{theme}{bear} // '#dd5856');
 
         # Mecha: línea delgada vertical desde high hasta low
         $canvas->createLine(
@@ -173,8 +171,8 @@ sub render_last_visible_price {
     my $w     = $scale->{width};
     my $label = sprintf("%.2f", $close);
     my $line_color = (defined $open && $close >= $open)
-        ? ($self->{theme}{bull} // '#26a69a')
-        : ($self->{theme}{bear} // '#ef5350');
+        ? ($self->{theme}{bull} // '#16b0a1')
+        : ($self->{theme}{bear} // '#dd5856');
     my $label_bg   = $line_color;
     my $label_fg   = $self->{theme}{last_price_fg} // '#ffffff';
 
@@ -211,7 +209,6 @@ sub render_last_visible_price {
 # draw_crosshair(): Dibuja el crosshair en este panel y sus etiquetas (valor + tiempo).
 sub draw_crosshair {
     my ($self, $x, $y, $time_text) = @_;
-
     my $canvas = $self->{canvas};
     return unless defined $canvas;
 
@@ -222,8 +219,8 @@ sub draw_crosshair {
     my $scale = $self->{scale};
 
     # Colores del tema con defaults seguros (tema claro).
-    my $line_color  = $self->{theme}{crosshair_line} // '#9598a1';
-    my $label_bg    = $self->{theme}{label_bg}        // '#363a45';
+    my $line_color  = $self->{theme}{crosshair_line} // '#888c8e';
+    my $label_bg    = $self->{theme}{label_bg}        // '#3a3849';
     my $label_fg    = $self->{theme}{label_fg}        // '#ffffff';
 
     # Línea vertical (sincronizada con ATRPanel)
@@ -235,7 +232,7 @@ sub draw_crosshair {
         -tags  => 'price_crosshair',
     );
 
-    # Línea horizontal y etiqueta de precio bajo el cursor (si tenemos Y)
+    # Línea horizontal y etiqueta de precio bajo el cursor 
     if (defined $y) {
         $canvas->createLine(
             0, $y, $w, $y,
@@ -246,8 +243,13 @@ sub draw_crosshair {
         );
 
         if (defined $scale && (!exists $scale->{draw_crosshair_label} || $scale->{draw_crosshair_label})) {
-            my $value = $scale->y_to_value($y);   # Convertir Y a precio
-            my $label = sprintf("%.2f", $value);
+    my $raw_value = $scale->y_to_value($y);
+
+    # Redondear al tick más cercano (0.25)
+    my $tick = $self->{tick_size} // 0.25;
+    my $value = int($raw_value / $tick + 0.5) * $tick;
+
+    my $label = sprintf("%.2f", $value);
 
             # Rectángulo de fondo
             $canvas->createRectangle(
@@ -378,4 +380,4 @@ sub draw_time_axis {
     $canvas->lower('time_grid') if $draw_grid;
 }
 
-1; 
+1;

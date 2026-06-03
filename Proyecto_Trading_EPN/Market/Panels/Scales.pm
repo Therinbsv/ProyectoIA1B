@@ -10,6 +10,7 @@ sub new {
     };
     # Margen derecho opcional. Solo afecta al eje X (ploteo horizontal).
     $self->{right_margin} = 0 unless defined $self->{right_margin};
+    $self->{x_shift} = 0 unless defined $self->{x_shift};
     bless $self, $class;
     return $self;
 }
@@ -27,7 +28,8 @@ sub index_to_x {
     my ($self, $index) = @_;
     my $bars  = $self->{bars} || 1;
     my $bar_w = $self->plot_width / $bars;
-    return $index * $bar_w;
+    my $x_shift = $self->{x_shift} || 0;
+    return $index * $bar_w + $x_shift;
 }
 
 # x_to_index(): Convierte coordenada X (píxel) al índice de barra ENTERO.
@@ -36,21 +38,21 @@ sub x_to_index {
     my $bars  = $self->{bars} || 1;
     my $bar_w = $self->plot_width / $bars;
     return 0 if $bar_w <= 0;
-    my $idx = int($x / $bar_w + 1e-9);  # floor con epsilon
+    my $x_shift = $self->{x_shift} || 0;
+    my $idx = int(($x - $x_shift) / $bar_w + 1e-9);  # floor con epsilon
     $idx = 0         if $idx < 0;
     $idx = $bars - 1 if $idx >= $bars;  # clamp al rango válido
     return $idx;
 }
 
 # x_to_index_float(): Versión en punto flotante para zoom con anclaje.
-# Devuelve el índice REAL (ej: 3.7) para que podamos hacer cálculos continuos
-# y luego redondear al entero más cercano después de reposicionar.
 sub x_to_index_float {
     my ($self, $x) = @_;
     my $bars  = $self->{bars} || 1;
     my $bar_w = $self->plot_width / $bars;
     return 0 if $bar_w <= 0;
-    return $x / $bar_w;
+    my $x_shift = $self->{x_shift} || 0;
+    return ($x - $x_shift) / $bar_w;
 }
 
 # index_to_center_x(): Centro de la barra (usado para velas y línea ATR).
@@ -59,12 +61,11 @@ sub index_to_center_x {
     my ($self, $index) = @_;
     my $bars  = $self->{bars} || 1;
     my $bar_w = $self->plot_width / $bars;
-    return $index * $bar_w + $bar_w / 2;
+    my $x_shift = $self->{x_shift} || 0;
+    return $index * $bar_w + $bar_w / 2 + $x_shift;
 }
 
 # value_to_y(): Valor financiero (precio, ATR) → coordenada Y (píxeles).
-# max_y se mapea a Y=0 (arriba), min_y se mapea a Y=height (abajo).
-# Es una transformación lineal inversa: Y = (max_y - value) / range * height.
 sub value_to_y {
     my ($self, $value) = @_;
     my $range = $self->{max_y} - $self->{min_y};
@@ -93,8 +94,6 @@ sub _draw_y_scale {
     return unless defined $min && defined $max;
 
     my $range = $max - $min;
-
-    # Req. 4.6: rango cero => no se dibuja nada, preservar contenido anterior.
     return if $range == 0;
 
     # Borrar marcas anteriores del eje Y (pero NO el contenido principal).
@@ -128,8 +127,7 @@ sub _draw_y_scale {
 
         next unless $draw_labels;
 
-        # Etiqueta numérica: más decimales para valores pequeños (ej: ATR),
-        # menos para valores grandes (ej: BTC 20000).
+        # Etiqueta numérica: más decimales para valores pequeños, menos para grandes.
         my $label = (abs($val) >= 100) ? sprintf("%.2f", $val) : sprintf("%.4f", $val);
         my $label_x      = defined $self->{label_x}      ? $self->{label_x}      : $width - 2;
         my $label_anchor = defined $self->{label_anchor} ? $self->{label_anchor} : 'e';
@@ -144,24 +142,24 @@ sub _draw_y_scale {
     }
 }
 
-# --- Helpers internos del eje Y (NO son métodos de instancia) ----------------
-
-# _floor(): floor() sin depender de POSIX (int() trunca hacia 0, no hacia -inf).
+# _floor(): sin depender de POSIX (int() trunca hacia 0, no hacia -inf).
 sub _floor {
     my ($x) = @_;
     my $i = int($x);
     return ($x < 0 && $x != $i) ? $i - 1 : $i;
 }
 
-# _ceil(): ceil() sin depender de POSIX.
+# _ceil(): sin depender de POSIX.
 sub _ceil {
     my ($x) = @_;
     my $i = int($x);
     return ($x > 0 && $x != $i) ? $i + 1 : $i;
+    my $n = shift;
+    return int($n) + 1 if $n > int($n);
+    return int($n);
 }
 
 # _ceil_div(): Menor entero k tal que k*step >= value.
-# Se resta un epsilon para tolerar errores de coma flotante.
 sub _ceil_div {
     my ($value, $step) = @_;
     return _ceil($value / $step - 1e-9);
